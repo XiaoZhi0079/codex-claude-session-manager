@@ -1,0 +1,26 @@
+# Local dependencies and package-manager output
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local tooling output
+.playwright-mcp/
+reports/
+coverage/
+
+# Operating-system/editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+
+# Never commit local session data or exported context
+.codex/
+.claude/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.jsonl

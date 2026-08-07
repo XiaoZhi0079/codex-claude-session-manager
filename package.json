@@ -1,0 +1,26 @@
+{
+  "name": "codex-turn-cleaner",
+  "version": "1.2.0",
+  "description": "Local Codex and Claude Code session manager",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "bin": {
+    "codex-turn-cleaner": "./bin/codex-turn-cleaner.mjs"
+  },
+  "scripts": {
+    "start": "node ./bin/codex-turn-cleaner.mjs",
+    "test": "node --test"
+  },
+  "files": [
+    "bin",
+    "src",
+    "public/index.html",
+    "public/app.js",
+    "public/styles.css",
+    "public/redesign.css",
+    "docs"
+  ]
+}
