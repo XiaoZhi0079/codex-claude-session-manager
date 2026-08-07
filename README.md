@@ -29,25 +29,24 @@ Local Session Manager 是一个面向 Windows 的本地会话管理工具，用�
 
 ## 快速开始
 
+普通用户只需要 Node.js，不需要安装任何第三方 npm 包，也不需要把工具安装成系统级命令。
+
 在 PowerShell 中执行：
 
 ```powershell
 git clone https://github.com/XiaoZhi0079/codex-turn-cleaner.git
 cd codex-turn-cleaner
-npm start
+node --version
+node .\bin\codex-turn-cleaner.mjs
 ```
+
+确认版本号为 `v22.5.0` 或更高版本即可。这里的 `node --version` 只是检查运行环境，不会修改任何文件。
 
 看到启动地址后，在浏览器打开：
 
 <http://127.0.0.1:18797>
 
 按 `Ctrl+C` 停止服务。
-
-也可以绕过 npm 脚本直接启动：
-
-```powershell
-node .\bin\codex-turn-cleaner.mjs
-```
 
 当前版本从源码运行。Windows 独立可执行版本尚未发布。
 
@@ -253,11 +252,14 @@ npm start -- --port 18798
 
 可能可以。会话正文通常保存在用户目录下的 Codex 或 Claude Code 数据目录，而不是只保存在项目目录中。但恢复会话不会恢复已删除的项目源码。
 
-## 开发与测试
+## 开发者信息（普通用户无需阅读）
 
-项目使用 Node.js 内置模块和原生 HTML、CSS、JavaScript，没有第三方运行依赖。
+以下内容只面向希望修改代码、运行测试或制作发布包的贡献者。普通用户不需要执行这些命令。
+
+项目使用 Node.js 内置模块和原生 HTML、CSS、JavaScript，没有第三方运行依赖。普通用户不需要执行 `npm install`、`npm install --global` 或 `npm pack`。
 
 ```powershell
+npm start
 npm test
 npm pack --dry-run
 ```
