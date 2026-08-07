@@ -1,164 +1,173 @@
 # Local Session Manager
 
-一个面向 Windows 的本地 Codex 与 Claude Code 会话管理器。
+Local Session Manager 是一个面向 Windows 的本地会话管理工具，用于统一查看和管理当前用户的 Codex 与 Claude Code 会话。
 
-它读取本机已经落盘的会话数据，提供搜索、轮次查看、完整上下文、诊断、编辑、清理、备份、恢复和删除功能。工具不代替 Codex 或 Claude Code，也不会把两个平台的会话格式互相转换。
+无论从哪个目录启动，工具都会读取当前 Windows 用户目录中的 `.codex` 和 `.claude` 数据。它不依赖当前工作目录，不要求在原项目目录中运行，也不会在 Codex 与 Claude Code 之间转换会话格式。
 
-Codex 模块合并正文、SQLite、旧索引和备份；Claude Code 模块按原生存储结构扫描主 JSONL、外置工具结果、子代理、任务、文件历史与会话环境。
+主要功能包括：
 
-服务默认只监听 `127.0.0.1:18797`，不上传会话内容，不依赖第三方 npm 包。运行环境要求 Node.js 22.5 或更高版本。
+- 按项目目录、会话和轮次浏览本机已落盘的记录。
+- 查看精简对话或完整落盘上下文。
+- 诊断缺少标题、正文、索引、外置工具结果或供应商不匹配等问题。
+- 编辑或清理 Codex 会话轮次。
+- 单条或批量删除 Codex 与 Claude Code 会话。
+- 管理、恢复或永久删除本工具创建的备份。
+- 修复可恢复 Codex 会话的供应商可见性。
+- 记录写操作，并在具备完整恢复点时提供一键撤销。
 
-> **安全提示**：会话内容可能包含代码、路径、提示词、工具输出和密钥片段。这个项目默认只绑定本机回环地址，但仍然不要把 `.codex`、`.claude`、备份目录或导出的上下文提交到公开仓库。
+服务只监听本机回环地址，默认不会向远端上传会话内容。
+
+> 会话可能包含源码、文件路径、提示词、工具输出、访问令牌或其他敏感信息。不要把 `.codex`、`.claude`、备份目录、SQLite、JSONL 或完整上下文导出提交到公开仓库。
+
+## 运行要求
+
+- Windows 10 或 Windows 11。
+- Node.js 22.5 或更高版本。
+- 已在当前 Windows 账户下使用过 Codex 或 Claude Code。
+
+项目不依赖任何第三方 npm 包。克隆后不需要执行 `npm install`。
 
 ## 快速开始
 
-在 PowerShell 中克隆并进入项目目录：
+在 PowerShell 中执行：
 
 ```powershell
 git clone https://github.com/XiaoZhi0079/codex-turn-cleaner.git
 cd codex-turn-cleaner
+npm start
 ```
 
-直接启动（推荐先验证环境）：
+看到启动地址后，在浏览器打开：
+
+<http://127.0.0.1:18797>
+
+按 `Ctrl+C` 停止服务。
+
+也可以绕过 npm 脚本直接启动：
 
 ```powershell
 node .\bin\codex-turn-cleaner.mjs
 ```
 
-然后打开 <http://127.0.0.1:18797>。
+当前版本从源码运行。Windows 独立可执行版本尚未发布。
 
-需要系统级命令时，在管理员 PowerShell 中执行：
+## 扫描范围
 
-```powershell
-npm install --global .
-codex-turn-cleaner
-```
-
-升级源码后，重新执行 `npm install --global .` 即可更新全局命令。若端口已占用，可使用 `--port 18798` 启动到其他端口。
-
-## 当前功能
-
-页面顶部可以在 Codex 与 Claude Code 两个并列模块之间切换。两者共享目录、会话、轮次和上下文布局，但底层使用不同的存储适配器。
+工具扫描当前用户的完整会话存储，而不是只扫描启动目录。
 
 ### Codex
 
-- 合并识别 `sessions`、`archived_sessions`、`session_index.jsonl`、`state_N.sqlite`、CCSwitch 备份和本工具备份。
-- 保留 Codex/SQLite 中的正式标题，只有缺少标题时才从正文推导备用标题。
-- 区分 Codex 可见、供应商不匹配、归档、仅 SQLite、仅备份和可恢复会话。
-- 紧凑模式查看正常对话；完整模式查看实际落盘的提示词、消息、工具调用、工具结果和内部事件。
-- 编辑单条用户/助手消息，或按轮次边界执行两种删除：从所选轮开始清理、只删除所选轮。
-- 单条或批量删除整会话，并管理、恢复或永久删除本工具生成的备份。
-- 把可恢复会话统一到当前供应商，使 Codex 重新识别。
-- 所有写操作使用预览指纹、备份、事务或失败回滚；写操作进入操作历史。
-- 最新且具有完整恢复点的操作可以一键撤销。
-- 会话、轮次、轮次操作三个区域可拖动调整宽度并独立折叠。
-
-### Claude Code
-
-- 全局扫描 `~/.claude/projects/*/*.jsonl`，不把可能过期的 `sessions-index.json` 当作正文真值。
-- 标题优先级为 `custom-title`、Claude 摘要、第一条真实用户消息；`/model` 等本地命令不会误当标题或对话轮次。
-- 聚合主 JSONL、`tool-results`、`subagents`、`tasks`、`file-history` 与 `session-env` 的数量和空间占用。
-- 精简模式只显示真实用户输入和 Claude 正文；落盘模式按“人类、Claude、工具、运行时注入、客户端、子代理”展示实际保存的记录。
-- 安全读取超过 30,000 字符后由 Bash/PowerShell 外置的 `tool-results` 原文，并提示缺失引用。
-- 诊断损坏 JSONL、无正文轮次、中断工具调用、缺失外置结果与子代理元数据异常。
-- 单条或批量删除完整 Claude 会话包；删除前备份主 JSONL、侧边目录、tasks、file-history、session-env 与原索引记录。
-- Claude 删除备份支持按会话恢复和永久删除；恢复遇到同 ID 的不同现有内容时拒绝覆盖。
-- Claude Code 内置基础身份提示词由客户端运行时组装，没有写入历史 JSONL；落盘模式不会把客户端 `type=system` 事件误称为系统提示词。
-
-## 安装与启动
-
-先在管理员 PowerShell 中确认 npm 的全局目录是系统级目录：
-
-```powershell
-npm config get prefix
-```
-
-本机应显示 `C:\Program Files\nodejs`。随后在项目目录执行：
-
-```powershell
-npm install --global .
-codex-turn-cleaner
-```
-
-打开 `http://127.0.0.1:18797`。源码升级后重新执行安装命令即可更新全局命令。
-
-也可以不安装，直接运行：
-
-```powershell
-node .\bin\codex-turn-cleaner.mjs
-```
-
-可用参数：
-
-```text
---port <port>          指定本地端口
---codex-home <path>    指定 .codex 数据目录
---claude-home <path>   指定 .claude 数据目录
---backup-root <path>   指定普通操作备份目录
---claude-backup-root <path> 指定 Claude 会话删除备份目录
-```
-
-对应环境变量为 `CODEX_CLEANER_PORT`、`PORT`、`CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`CLAUDE_HOME`、`CODEX_CLEANER_BACKUP_ROOT`、`CLAUDE_SESSION_MANAGER_BACKUP_ROOT`。
-
-## 项目结构
-
-```text
-bin/                         命令行入口
-src/                         服务端、会话解析、删除、恢复与备份模块
-public/                      HTML、CSS 和前端 JavaScript
-docs/                        架构、API 与数据安全文档
-test/                        Node.js 原生测试
-```
-
-## 推荐工作流
-
-1. 点击“刷新”，重新扫描本机数据源。
-2. 选择目录、会话和轮次；先查看紧凑或完整上下文。
-3. 编辑、清理、删除、恢复或修复之前先查看服务端预览。
-4. 按页面要求输入 `EDIT`、`DELETE`、`PURGE`、`SYNC`、`RESTORE`、`ROLLBACK`、`ERASE` 或 `UNDO`。
-5. 写操作完成后按提示刷新/重新打开 Codex；涉及 SQLite 恢复或供应商修复时重新启动 Codex。
-6. 需要复核时打开“操作历史”；需要手动恢复或释放空间时打开“备份管理”。
-
-Claude Code 当前工作流是：切换到 Claude Code → 选择项目与会话 → 查看轮次 → 在精简/落盘模式间切换 → 使用“诊断”检查会话数据包。删除时先预览完整数据包并输入 `PURGE`；需要恢复或释放备份空间时打开“备份管理”。
-
-## Codex 运行时规则
-
-| 操作 | Codex 可运行 | 生效方式 |
-|---|---:|---|
-| 扫描、诊断、预览、上下文查看/导出 | 是 | 立即 |
-| 消息编辑、轮次清理 | 是 | 刷新或重新打开该会话 |
-| 单条/批量删除整会话 | 是 | 刷新或重新打开 Codex，避免旧缓存继续显示 |
-| 永久删除本工具备份 | 是 | 立即，不可撤销 |
-| 可见性修复 | 否 | 完全退出 Codex 后执行，随后重新启动 |
-| 恢复删除备份、会话快照、可见性备份 | 否 | 完全退出 Codex 后执行，随后重新启动 |
-| 一键撤销 | 取决于原操作 | 轮次文件恢复可运行；涉及 SQLite 的恢复要求退出 Codex |
-
-工具允许 Codex 运行时删除或编辑，是因为每次都会校验当前文件状态并保留恢复点；Codex 可能仍缓存旧列表，因此页面会明确提示刷新。需要修改或插入 SQLite 线程记录的恢复操作会主动阻止运行时写入。
-
-## 数据和备份位置
-
-默认 Codex 数据目录：
+默认数据目录：
 
 ```text
 %USERPROFILE%\.codex
 ```
 
-普通轮次、编辑、可见性与恢复安全点：
+工具会合并以下来源：
+
+- `sessions/**/rollout-*.jsonl`
+- `archived_sessions/**/rollout-*.jsonl`
+- 最新可用的 `state_N.sqlite`
+- `session_index.jsonl`
+- CCSwitch 迁移备份
+- 本工具创建的操作备份和删除备份
+
+SQLite 和索引可以提供标题、供应商和可见性信息，JSONL 或可验证备份负责提供正文。工具不会把只有标题、没有可恢复正文的记录伪装成完整会话。
+
+### Claude Code
+
+默认数据目录：
+
+```text
+%USERPROFILE%\.claude
+```
+
+工具以 `projects/<项目>/<sessionId>.jsonl` 为正文来源，并按会话聚合：
+
+- `tool-results`
+- `subagents`
+- `tasks`
+- `file-history`
+- `session-env`
+- `sessions-index.json` 中的标题和项目元数据
+
+Codex 与 Claude Code 使用独立的存储适配器。两者在页面中并列管理，不进行格式转换。
+
+## 主要功能
+
+### Codex 会话
+
+- 保留 Codex/SQLite 中的正式标题；正式标题缺失时才从首条真实用户消息推导备用标题。
+- 区分 Codex 可见、供应商不匹配、归档、仅 SQLite、仅备份和可恢复状态。
+- 精简模式展示正常对话，完整模式展示实际落盘的提示词、消息、工具调用、工具结果和内部事件。
+- 支持编辑单条用户或助手消息。
+- 支持从所选轮次开始清理，或只删除所选轮次。
+- 支持单条和批量删除整会话。
+- 支持恢复删除备份、操作快照和供应商可见性备份。
+- 支持把可恢复会话调整为当前 Codex 供应商可见。
+
+### Claude Code 会话
+
+- 优先使用 `custom-title`、Claude 摘要和首条真实用户消息生成标题。
+- 不把 `/model` 等本地控制命令误认为会话标题或正常轮次。
+- 精简模式只显示真实用户输入和 Claude 正文。
+- 落盘模式区分人类、Claude、工具、运行时注入、客户端事件和子代理记录。
+- 安全读取会话目录中的外置工具结果和子代理流。
+- 诊断损坏 JSONL、中断工具调用、缺失外置结果和侧边数据异常。
+- 删除时把主 JSONL、侧边目录、任务、文件历史、会话环境和索引记录作为一个会话包处理。
+- 支持单条和批量删除，以及删除备份的恢复和永久删除。
+
+## 基本使用
+
+1. 启动工具并打开页面。
+2. 在顶部选择 Codex 或 Claude Code。
+3. 点击“刷新”扫描当前用户的会话数据。
+4. 依次选择项目目录、会话和轮次。
+5. 使用精简模式阅读正常对话，或使用完整/落盘模式检查实际保存的上下文。
+6. 写操作前先查看预览、影响范围和备份位置。
+7. 按页面要求输入确认词后执行。
+8. 操作完成后按照页面提示刷新或重新打开对应客户端。
+
+会话、轮次和操作区域可以调整宽度或独立折叠。备份恢复、永久删除和操作历史位于页面对应的管理入口。
+
+## 写操作与安全
+
+工具对写操作采用以下保护：
+
+- 执行前生成预览和源文件指纹。
+- 执行时重新校验文件，拒绝使用已经过期的预览。
+- 删除或修改前创建备份或安全点。
+- SQLite 修改使用事务。
+- 文件写入尽量使用原子替换。
+- 写入失败时尝试恢复原始内容。
+- 操作结果写入本地操作历史。
+
+不同操作对客户端运行状态有不同要求：
+
+| 操作 | 客户端可以运行 | 生效方式 |
+|---|---:|---|
+| 扫描、诊断、预览和上下文查看 | 是 | 立即 |
+| Codex 消息编辑和轮次清理 | 是 | 刷新或重新打开会话 |
+| 删除 Codex 整会话 | 是 | 刷新或重新打开 Codex |
+| 删除 Claude Code 会话 | 建议退出相关会话 | 重新打开 Claude Code 后复核 |
+| 永久删除本工具备份 | 是 | 立即且不可撤销 |
+| Codex 供应商可见性修复 | 否 | 完全退出 Codex 后执行 |
+| 恢复涉及 SQLite 的 Codex 备份 | 否 | 完全退出 Codex 后执行 |
+
+客户端可能缓存旧列表或在退出前重新写入正在使用的会话。执行删除、恢复或可见性修复后，应按页面提示重新启动客户端并再次刷新本工具。
+
+## 备份位置
+
+Codex 普通操作、轮次编辑、可见性修复和恢复安全点：
 
 ```text
 %USERPROFILE%\.codex\backups\codex-turn-cleaner
 ```
 
-整会话删除备份：
+Codex 整会话删除备份：
 
 ```text
 %USERPROFILE%\.codex\backups\codex-turn-cleaner-deleted-sessions
-```
-
-操作历史：
-
-```text
-%USERPROFILE%\.codex\backups\codex-turn-cleaner\operation-history.jsonl
 ```
 
 Claude Code 整会话删除备份：
@@ -167,24 +176,100 @@ Claude Code 整会话删除备份：
 %USERPROFILE%\.claude\backups\local-session-manager-deleted-sessions
 ```
 
-“备份管理”只管理经过结构和路径校验的本工具备份，不会删除 CCSwitch 备份或任意目录。永久删除不会伪装成可撤销操作。
+“备份管理”只管理通过结构和路径校验的本工具备份，不会把 CCSwitch 备份或任意目录当作可删除目标。永久删除备份不可撤销。
 
-## 重要限制
+## 启动参数
 
-- 工具只能展示实际写入 rollout 或可验证备份的内容；从未落盘、已被永久删除或无法解密的内容不能恢复。
-- 只有 SQLite 标题但没有 rollout/匹配备份的会话没有正文可读。
-- 只有 CCSwitch 备份、但没有安全目标路径或 SQLite 线程身份的条目不会被工具伪造成正式会话。
-- 删除模式只保证 JSONL 结构有效；删除中间轮次后，后续语义可能仍引用已经删除的上下文。
-- 操作历史不是无限撤销栈：只有当前最新、未撤销且具有完整恢复点的操作开放一键撤销。旧恢复点仍可在“备份管理”中人工检查。
-- Claude Code 的 `sessions-index.json` 仅用于补充标题和项目元数据；索引中存在但主 JSONL 不存在的记录不会伪装成完整会话。
-- Claude Code 落盘模式只读取位于当前会话安全侧边目录中的外置结果；JSONL 中指向任意其他路径的引用不会被读取。
-- 删除正在使用的 Claude 会话后，Claude Code 可能在退出前从内存重新写回该会话；删除完成后应退出或重新打开 Claude Code，并再次刷新本工具确认。
+```text
+--port <port>                 指定本地端口
+--codex-home <path>           指定 Codex 数据目录
+--claude-home <path>          指定 Claude Code 数据目录
+--backup-root <path>          指定 Codex 普通操作备份目录
+--claude-backup-root <path>   指定 Claude Code 删除备份目录
+-h, --help                    显示帮助
+```
 
-## 开发与验证
+示例：
+
+```powershell
+npm start -- --port 18798
+```
+
+可用环境变量：
+
+- `CODEX_CLEANER_PORT`
+- `PORT`
+- `CODEX_HOME`
+- `CLAUDE_CONFIG_DIR`
+- `CLAUDE_HOME`
+- `CODEX_CLEANER_BACKUP_ROOT`
+- `CLAUDE_SESSION_MANAGER_BACKUP_ROOT`
+
+## 已知限制
+
+- 工具只能展示实际落盘或存在于可验证备份中的内容。
+- 从未保存、已被永久删除或无法解析的内容不能恢复。
+- 只有 SQLite 标题但没有 JSONL 或匹配备份的会话没有正文可读。
+- 删除中间轮次后，后续内容可能仍在语义上引用已删除的上下文。
+- 操作历史不是无限撤销栈；只有最新、未撤销且具备完整恢复点的操作可以一键撤销。
+- Claude Code 的内置基础身份提示词由客户端在运行时组装，未必写入历史 JSONL。
+- 恢复会话记录不会恢复已经删除的项目源码或工作目录。
+
+## 常见问题
+
+### 从其他目录启动会漏掉会话吗？
+
+不会。默认扫描范围由当前用户的 `%USERPROFILE%\.codex` 和 `%USERPROFILE%\.claude` 决定，与启动命令所在目录无关。
+
+### 页面打不开怎么办？
+
+确认 Node.js 版本满足要求：
+
+```powershell
+node --version
+```
+
+检查默认端口是否被占用：
+
+```powershell
+Get-NetTCPConnection -LocalPort 18797 -State Listen -ErrorAction SilentlyContinue
+```
+
+端口被占用时可以改用：
+
+```powershell
+npm start -- --port 18798
+```
+
+### 列表中没有刚产生的会话怎么办？
+
+点击页面中的“刷新”。如果刚执行过恢复、删除或供应商可见性修复，请完全退出并重新打开对应客户端，然后再次刷新。
+
+### 删除后客户端仍显示旧会话怎么办？
+
+这通常是客户端缓存导致的。先重新打开客户端，再回到本工具刷新确认。在确认不需要恢复前，不要永久删除对应备份。
+
+### 原项目目录已经不存在，还能找到会话吗？
+
+可能可以。会话正文通常保存在用户目录下的 Codex 或 Claude Code 数据目录，而不是只保存在项目目录中。但恢复会话不会恢复已删除的项目源码。
+
+## 开发与测试
+
+项目使用 Node.js 内置模块和原生 HTML、CSS、JavaScript，没有第三方运行依赖。
 
 ```powershell
 npm test
 npm pack --dry-run
+```
+
+项目结构：
+
+```text
+bin/       命令行入口
+src/       服务端、会话解析、删除、恢复和备份模块
+public/    浏览器界面
+test/      Node.js 原生测试
+docs/      架构、API 和数据安全文档
 ```
 
 详细资料：
@@ -193,46 +278,18 @@ npm pack --dry-run
 - [数据安全、回滚与撤销](docs/DATA-SAFETY.md)
 - [HTTP API](docs/API.md)
 
-## 常见问题
+## 问题反馈
 
-### 页面打不开
+提交 Issue 时，请提供：
 
-确认 Node.js 版本满足 `>=22.5`，并检查端口是否已被占用：
+- Windows 版本
+- Node.js 版本
+- 使用的是 Codex 还是 Claude Code
+- 可复现的操作步骤
+- 脱敏后的错误信息
 
-```powershell
-node --version
-Get-NetTCPConnection -LocalPort 18797 -State Listen -ErrorAction SilentlyContinue
-```
-
-端口冲突时，使用 `node .\bin\codex-turn-cleaner.mjs --port 18798`，然后访问对应地址。
-
-### 从旧目录迁移后全局命令报 `EPERM` 或找不到模块
-
-旧版本如果使用过 `npm install --global .`，全局安装可能仍指向旧目录。请在管理员 PowerShell 中卸载，再进入新克隆的项目目录重新安装：
-
-```powershell
-npm uninstall --global codex-turn-cleaner
-cd codex-turn-cleaner
-npm install --global .
-codex-turn-cleaner --help
-```
-
-### 列表中没有刚产生的会话
-
-点击页面中的“刷新”。Codex 或 Claude Code 可能仍持有旧缓存；涉及恢复、供应商可见性或 SQLite 的操作时，应完全退出对应客户端后再刷新。
-
-### 删除后客户端仍显示旧会话
-
-这是客户端缓存造成的可能性较高。工具删除前会创建备份；先刷新或重新打开客户端，再回到本工具确认。不要在确认需要恢复前永久删除备份。
-
-### 原项目目录已经不存在
-
-会话正文通常仍保存在 `%USERPROFILE%\.claude\projects` 或 `%USERPROFILE%\.codex` 下，项目目录本身不会承载全部对话正文。本工具可以从现存正文或工具备份恢复会话；但恢复会话不会恢复被删除的项目源码。需要继续在原项目上下文中工作时，应先重建原路径。
-
-### 如何报告问题
-
-提交 Issue 时请提供 Node.js 版本、操作系统、复现步骤和脱敏后的错误信息。不要上传 JSONL、SQLite、备份清单、访问令牌、密钥或完整上下文导出文件。
+不要上传真实 JSONL、SQLite、备份清单、完整上下文、访问令牌或密钥。
 
 ## 许可证
 
-本仓库目前未声明开源许可证。未经项目所有者另行授权，不应将代码用于再分发或商业发行；发布到 GitHub 前请根据实际意图补充合适的 `LICENSE` 文件。
+本仓库目前未声明开源许可证。公开可见不等于允许复制、修改、再分发或商业使用；使用和分发权限以仓库后续提供的 `LICENSE` 为准。
