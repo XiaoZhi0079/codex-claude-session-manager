@@ -38,6 +38,15 @@ Claude 会话删除与备份：
 
 删除与恢复都必须携带预览返回的 `planToken`。目标状态改变后返回 409，不会继续使用过期计划。
 
+Claude Code 轮次删除：
+
+| 方法 | 路径 | 用途 / 确认词 |
+|---|---|---|
+| POST | `/api/claude-code/sessions/:id/turns/:turnId/delete-preview` | 预览删除该轮对话及引用的外置产物 |
+| POST | `/api/claude-code/sessions/:id/turns/:turnId/delete-apply` | 备份并删除该轮；确认词 `DELETE` |
+
+轮次删除 `mode` 为 `truncate`（该轮及之后截断）或 `single`（仅删除所选轮）。写入接口必须携带预览返回的 `sourceHash`。会一并删除该轮引用的 `tool-results` 外置输出文件与关联子代理 JSONL，写前备份、可一键撤销。
+
 ## 轮次编辑与清理
 
 | 方法 | 路径 | 确认词 |

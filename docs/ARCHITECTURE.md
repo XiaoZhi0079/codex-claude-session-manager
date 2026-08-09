@@ -17,6 +17,7 @@ Local Session Manager 是本地单进程工具：Node.js HTTP 服务负责扫描
 | `src/context-view.mjs` | 完整上下文分类、过滤、分页、定位和导出 |
 | `src/claude-sessions.mjs` | Claude Code 主会话扫描、标题解析、轮次、侧边数据、子代理、诊断与落盘上下文 |
 | `src/claude-session-delete.mjs` | Claude 完整会话包删除预览、指纹校验、备份、恢复与永久删除 |
+| `src/claude-turn-delete.mjs` | Claude 单轮对话删除预览、主 JSONL 与外置产物备份、字节保留重写与恢复 |
 | `src/session-health.mjs` | 单会话正文、标题、SQLite、供应商和备份诊断 |
 | `src/session-delete.mjs` | 整会话预览、单条/批量删除、删除备份管理和恢复 |
 | `src/operation-backup.mjs` | 轮次快照与系统备份的发现、删除、预览和恢复 |

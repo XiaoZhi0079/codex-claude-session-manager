@@ -16,6 +16,7 @@ function printHelp() {
     '  --claude-home <path>   Use a specific .claude directory',
     '  --backup-root <path>   Store backups in a specific directory',
     '  --claude-backup-root <path> Store Claude deletion backups in a specific directory',
+    '  --claude-turn-backup-root <path> Store Claude turn deletion backups in a specific directory',
     '  -h, --help             Show this help',
     '',
   ].join('\n'));
@@ -35,6 +36,7 @@ function parseArgs(argv) {
       '--claude-home': 'claudeHome',
       '--backup-root': 'backupRoot',
       '--claude-backup-root': 'claudeBackupRoot',
+      '--claude-turn-backup-root': 'claudeTurnBackupRoot',
     }[flag];
     if (!name) throw new Error(`Unknown option: ${argument}`);
     const value = inlineValue ?? argv[++index];

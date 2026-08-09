@@ -344,7 +344,7 @@ async function inspectSession({ claudeHome, projectDir, projectKey, sessionId, f
   };
 }
 
-function publicSession(session) {
+export function publicSession(session) {
   const { _records, _turns, _subagents, _persistedOutputs, ...value } = session;
   return value;
 }
@@ -402,7 +402,7 @@ export async function buildClaudeSessionRegistry(claudeHome = getDefaultClaudeHo
   };
 }
 
-async function findSession(claudeHome, sessionId) {
+export async function findSession(claudeHome, sessionId) {
   if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
     throw new CleanerError('INVALID_CLAUDE_SESSION_ID', 'Claude session ID must be a UUID.', 400, { sessionId });
   }
@@ -435,7 +435,7 @@ export async function readClaudeSessionTurns(claudeHome, sessionId) {
   return { session: publicSession(session), turns: session._turns, recordCount: session._records.length };
 }
 
-function selectedTurn(session, turnId) {
+export function selectedTurn(session, turnId) {
   const turn = session._turns.find((item) => item.turnId === turnId || String(item.index) === String(turnId));
   if (!turn) throw new CleanerError('CLAUDE_TURN_NOT_FOUND', 'Claude conversation turn was not found.', 404, { turnId });
   return turn;

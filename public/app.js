@@ -89,7 +89,7 @@ function configurePlatformUI() {
   $('visibilityButton').classList.toggle('hidden', claude);
   $('batchToolbar').classList.remove('hidden');
   $('deleteSessionButton').classList.remove('hidden');
-  $('operationSwitcher').classList.toggle('hidden', claude);
+  $('operationSwitcher').classList.remove('hidden');
   $('fullContextExport').classList.toggle('hidden', claude);
   $('sessionPanelTitle').textContent = claude ? 'Claude 会话' : '会话';
   $('turnPanelTitle').textContent = claude ? '对话轮次' : '轮次';
@@ -539,7 +539,6 @@ async function undoLatestOperation() {
 }
 
 function setOperationView(operation) {
-  if (isClaudePlatform()) operation = 'messages';
   state.operation = operation;
   const messagesActive = operation === 'messages';
   $('messagesView').classList.toggle('hidden', !messagesActive);
@@ -1064,7 +1063,19 @@ function renderCleanupPreview(body) {
     : '无';
   $('previewBackup').textContent = body.backupRoot || '-';
   if (state.operation === 'cleanup') $('modeBadge').textContent = isSingle ? '删除模式 · B' : '删除模式 · A';
-  if (isSingle && preview.keepsLaterTurns) {
+  if (isClaudePlatform()) {
+    const external = preview.externalArtifacts;
+    const parts = [];
+    if (external?.toolResultFiles?.length) parts.push(`${external.toolResultFiles.length} 个外置工具结果文件`);
+    if (external?.subagents?.length) parts.push(`${external.subagents.length} 个子代理`);
+    if (parts.length) {
+      $('modeWarning').textContent = `本轮引用的外置产物将一并删除：${parts.join('、')}。删除时会同步清理这些文件，撤销可完整恢复。`;
+      $('modeWarning').className = 'mode-warning warning';
+    } else {
+      $('modeWarning').textContent = '';
+      $('modeWarning').className = 'mode-warning hidden';
+    }
+  } else if (isSingle && preview.keepsLaterTurns) {
     $('modeWarning').textContent = `警告：后续 ${preview.laterTurnCount} 轮将被保留，但其中可能引用本轮产生的上下文。`;
     $('modeWarning').className = 'mode-warning warning';
   } else {
@@ -1553,9 +1564,17 @@ async function selectTurn(index, options = {}) {
   $('messageList').innerHTML = '<div class="list-status">正在加载本轮消息...</div>';
 
   if (isClaudePlatform()) {
-    const detailBody = await api(`/api/claude-code/sessions/${encodeURIComponent(state.selectedSession.id)}/turns/${encodeURIComponent(state.selectedTurn.turnId)}`);
+    const turnUrl = `/api/claude-code/sessions/${encodeURIComponent(state.selectedSession.id)}/turns/${encodeURIComponent(state.selectedTurn.turnId)}`;
+    const [detailBody, cleanupBody] = await Promise.all([
+      api(turnUrl),
+      api(`${turnUrl}/delete-preview`, {
+        method: 'POST',
+        body: JSON.stringify({ mode: state.mode }),
+      }),
+    ]);
     state.turnDetail = detailBody;
-    state.preview = null;
+    state.preview = cleanupBody.preview;
+    state.cleanupSourceHash = cleanupBody.sourceHash;
     renderMessages();
     $('compactContextButton').disabled = false;
     $('fullContextButton').disabled = false;
@@ -1564,7 +1583,8 @@ async function selectTurn(index, options = {}) {
     $('exportFullContextMarkdownButton').disabled = true;
     updateContextModeUI();
     if (state.contextMode === 'full') await loadFullContext(0);
-    setOperationView('messages');
+    renderCleanupPreview(cleanupBody);
+    setOperationView(options.operation || 'messages');
     return;
   }
 
@@ -1595,14 +1615,19 @@ async function selectTurn(index, options = {}) {
 
 async function refreshCleanupPreview() {
   if (!state.selectedTurn) return;
-  const body = await api('/api/preview', {
-    method: 'POST',
-    body: JSON.stringify({
-      sessionId: state.selectedSession.id,
-      selector: selectorForTurn(state.selectedTurn),
-      mode: state.mode,
-    }),
-  });
+  const body = await api(
+    isClaudePlatform()
+      ? `/api/claude-code/sessions/${encodeURIComponent(state.selectedSession.id)}/turns/${encodeURIComponent(state.selectedTurn.turnId)}/delete-preview`
+      : '/api/preview',
+    {
+      method: 'POST',
+      body: JSON.stringify(
+        isClaudePlatform()
+          ? { mode: state.mode }
+          : { sessionId: state.selectedSession.id, selector: selectorForTurn(state.selectedTurn), mode: state.mode },
+      ),
+    },
+  );
   state.preview = body.preview;
   state.cleanupSourceHash = body.sourceHash;
   renderCleanupPreview(body);
@@ -1662,22 +1687,39 @@ async function restoreLastEdit() {
 
 async function applyCleanup() {
   setAlert('');
-  const body = await api('/api/apply', {
-    method: 'POST',
-    body: JSON.stringify({
-      sessionId: state.selectedSession.id,
-      selector: selectorForTurn(state.selectedTurn),
-      mode: state.mode,
-      sourceHash: state.cleanupSourceHash,
-      confirmation: $('confirmation').value,
-    }),
-  });
-  const summary = JSON.stringify({
-    mode: state.mode,
-    backupDir: body.backupDir,
-    removedRecords: body.preview.removedCount,
-    remainingRecords: body.validation.recordCount,
-  }, null, 2);
+  const body = await api(
+    isClaudePlatform()
+      ? `/api/claude-code/sessions/${encodeURIComponent(state.selectedSession.id)}/turns/${encodeURIComponent(state.selectedTurn.turnId)}/delete-apply`
+      : '/api/apply',
+    {
+      method: 'POST',
+      body: JSON.stringify(
+        isClaudePlatform()
+          ? { mode: state.mode, sourceHash: state.cleanupSourceHash, confirmation: $('confirmation').value }
+          : {
+              sessionId: state.selectedSession.id,
+              selector: selectorForTurn(state.selectedTurn),
+              mode: state.mode,
+              sourceHash: state.cleanupSourceHash,
+              confirmation: $('confirmation').value,
+            },
+      ),
+    },
+  );
+  const summary = JSON.stringify(isClaudePlatform()
+    ? {
+        mode: state.mode,
+        backupDir: body.backup?.backupDir,
+        removedRecords: body.deleted.recordCount,
+        removedToolResultFiles: body.deleted.toolResultFiles,
+        removedSubagents: body.deleted.subagents,
+      }
+    : {
+        mode: state.mode,
+        backupDir: body.backupDir,
+        removedRecords: body.preview.removedCount,
+        remainingRecords: body.validation.recordCount,
+      }, null, 2);
   await selectSession(state.selectedSession.id);
   $('result').textContent = summary;
   setOperationView('cleanup');

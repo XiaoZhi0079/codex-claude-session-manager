@@ -60,6 +60,11 @@ import {
   previewClaudeSessionDeletion,
   previewClaudeSessionDeletionBackupRestore,
 } from './claude-session-delete.mjs';
+import {
+  applyClaudeTurnDeletion,
+  previewClaudeTurnDeletion,
+  restoreClaudeTurnDeleteBackup,
+} from './claude-turn-delete.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -204,6 +209,9 @@ export function createCleanerServer(options = {}) {
   const claudeBackupRoot = options.claudeBackupRoot
     || env.CLAUDE_SESSION_MANAGER_BACKUP_ROOT
     || path.join(claudeHome, 'backups', 'local-session-manager-deleted-sessions');
+  const claudeTurnBackupRoot = options.claudeTurnBackupRoot
+    || env.CLAUDE_TURN_MANAGER_BACKUP_ROOT
+    || path.join(claudeHome, 'backups', 'local-session-manager-deleted-turns');
   const publicDir = options.publicDir || path.join(__dirname, '..', 'public');
   const operationHistory = createOperationHistory({
     backupRoot,
@@ -276,6 +284,13 @@ export function createCleanerServer(options = {}) {
         backupId: undo.backupId,
         sessionIds: undo.sessionIds,
         planToken: preview.planToken,
+      });
+    }
+    if (undo.type === 'claude_turn_delete_restore') {
+      return restoreClaudeTurnDeleteBackup(claudeHome, {
+        backupRoot: claudeTurnBackupRoot,
+        backupDir: undo.backupDir,
+        expectedCurrentHash: undo.expectedCurrentHash,
       });
     }
     throw new CleanerError('UNDO_NOT_SUPPORTED', 'The latest operation does not have a supported restore point.', 409);
@@ -416,6 +431,65 @@ export function createCleanerServer(options = {}) {
             },
           ),
         });
+        return;
+      }
+
+      const claudeTurnDeletePreviewMatch = requestUrl.pathname.match(/^\/api\/claude-code\/sessions\/([^/]+)\/turns\/([^/]+)\/delete-preview$/);
+      if (claudeTurnDeletePreviewMatch && request.method === 'POST') {
+        const body = await readJsonRequest(request);
+        const result = await previewClaudeTurnDeletion(
+          claudeHome,
+          decodeURIComponent(claudeTurnDeletePreviewMatch[1]),
+          decodeURIComponent(claudeTurnDeletePreviewMatch[2]),
+          { mode: body.mode, backupRoot: claudeTurnBackupRoot },
+        );
+        sendJson(response, 200, {
+          backupRoot: result.backupRoot,
+          sourceHash: result.sourceHash,
+          preview: {
+            mode: result.mode,
+            turn: result.turn,
+            nextTurn: result.nextTurn,
+            startLine: result.startLine,
+            endLine: result.endLine,
+            removedCount: result.removedRecordCount,
+            keptCount: result.keptRecordCount,
+            externalArtifacts: result.externalArtifacts,
+          },
+        });
+        return;
+      }
+
+      const claudeTurnDeleteApplyMatch = requestUrl.pathname.match(/^\/api\/claude-code\/sessions\/([^/]+)\/turns\/([^/]+)\/delete-apply$/);
+      if (claudeTurnDeleteApplyMatch && request.method === 'POST') {
+        const body = await readJsonRequest(request);
+        if (body.confirmation !== 'DELETE') {
+          throw new CleanerError('CLAUDE_TURN_DELETE_CONFIRMATION_REQUIRED', 'Type DELETE to delete this Claude conversation turn.', 400);
+        }
+        const sessionId = decodeURIComponent(claudeTurnDeleteApplyMatch[1]);
+        const turnId = decodeURIComponent(claudeTurnDeleteApplyMatch[2]);
+        const result = await executeRecordedOperation({
+          kind: body.mode === 'truncate' ? 'claude_turn_delete_truncate' : 'claude_turn_delete_single',
+          label: body.mode === 'truncate' ? '从选中轮次清理 Claude 会话' : '删除选中 Claude 轮次',
+          sessionIds: [sessionId],
+          details: { turnId },
+        }, () => applyClaudeTurnDeletion(claudeHome, sessionId, turnId, {
+          mode: body.mode,
+          sourceHash: body.sourceHash,
+          backupRoot: claudeTurnBackupRoot,
+        }), (value) => ({
+          result: {
+            deleted: value.deleted,
+            claudeRefreshRecommended: value.claudeRefreshRecommended,
+          },
+          undo: {
+            type: 'claude_turn_delete_restore',
+            backupDir: value.backup.backupDir,
+            expectedCurrentHash: value.sourceHashAfter,
+          },
+        }));
+        claudeRegistryCache = null;
+        sendJson(response, 200, result);
         return;
       }
 
