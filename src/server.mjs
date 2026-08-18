@@ -101,6 +101,10 @@ function sendJson(response, status, body) {
   response.end(JSON.stringify(body));
 }
 
+function isClaudeOperation(kind) {
+  return String(kind || '').startsWith('claude_');
+}
+
 function sendDownload(response, download) {
   response.writeHead(200, {
     'content-type': download.contentType,
@@ -262,7 +266,23 @@ export function createCleanerServer(options = {}) {
   let claudeRegistryCache = null;
 
   async function executeRecordedOperation(meta, action, completionBuilder = () => ({})) {
-    const operationId = await operationHistory.start(meta);
+    const sessionIds = [...new Set((meta.sessionIds || []).map(String))];
+    let sessionTitles = {};
+    try {
+      const registry = isClaudeOperation(meta.kind)
+        ? await loadClaudeRegistry({ refresh: true })
+        : await loadRegistry({ refresh: true });
+      sessionTitles = Object.fromEntries(sessionIds
+        .map((id) => registry.sessions.find((session) => session.id === id))
+        .filter(Boolean)
+        .map((session) => [session.id, session.title || '(无标题会话)']));
+    } catch {
+      // Operation recording must not block the mutation if title lookup fails.
+    }
+    const operationId = await operationHistory.start({
+      ...meta,
+      details: { ...(meta.details || {}), sessionTitles },
+    });
     try {
       const result = await action();
       await operationHistory.complete(operationId, completionBuilder(result) || {});
@@ -586,6 +606,7 @@ export function createCleanerServer(options = {}) {
           kind: body.mode === 'truncate' ? 'claude_turn_delete_truncate' : 'claude_turn_delete_single',
           label: body.mode === 'truncate' ? '从选中轮次清理 Claude 会话' : '删除选中 Claude 轮次',
           sessionIds: [sessionId],
+          details: { turnId, mode: body.mode },
           details: { turnId },
         }, () => applyClaudeTurnDeletion(claudeHome, sessionId, turnId, {
           mode: body.mode,
@@ -623,7 +644,7 @@ export function createCleanerServer(options = {}) {
         if (body.confirmation !== 'EDIT') throw new CleanerError('CLAUDE_EDIT_CONFIRMATION_REQUIRED', 'Type EDIT to apply Claude message changes.', 400);
         const sessionId = decodeURIComponent(claudeEditApplyMatch[1]);
         const turnId = decodeURIComponent(claudeEditApplyMatch[2]);
-        const result = await executeRecordedOperation({ kind: 'claude_message_edit', label: '编辑 Claude 会话消息', sessionIds: [sessionId] }, () => applyClaudeMessageEdits(claudeHome, sessionId, turnId, body.edits, { sourceHash: body.sourceHash, backupRoot: claudeTurnBackupRoot }), (value) => ({
+        const result = await executeRecordedOperation({ kind: 'claude_message_edit', label: '编辑 Claude 会话消息', sessionIds: [sessionId], details: { turnId, changedMessages: body.edits?.length || 0 } }, () => applyClaudeMessageEdits(claudeHome, sessionId, turnId, body.edits, { sourceHash: body.sourceHash, backupRoot: claudeTurnBackupRoot }), (value) => ({
           result: { editedMessages: value.changedCount, claudeRefreshRecommended: true },
           undo: { type: 'claude_message_edit_restore', backupRoot: claudeTurnBackupRoot, backupDir: value.backupDir, expectedCurrentHash: value.sourceHashAfter },
         }));
@@ -1235,6 +1256,7 @@ export function createCleanerServer(options = {}) {
           kind: 'message_edit',
           label: '编辑会话消息',
           sessionIds: [sessionId],
+          details: { selector: requireSelector(body), changedMessages: body.edits?.length || 0 },
         }, () => applyMessageEdits({
           codexHome,
           sessionId,
@@ -1269,6 +1291,7 @@ export function createCleanerServer(options = {}) {
           kind: 'message_edit_restore',
           label: '恢复编辑前的会话消息',
           sessionIds: [sessionId],
+          details: { backupPath: body.backupPath },
         }, () => restoreRolloutBackup({
           codexHome,
           sessionId,
@@ -1320,6 +1343,7 @@ export function createCleanerServer(options = {}) {
           kind: mode === CLEANUP_MODES.SINGLE ? 'turn_delete_single' : 'turn_delete_truncate',
           label: mode === CLEANUP_MODES.SINGLE ? '删除选中轮次' : '从选中轮次开始清理',
           sessionIds: [sessionId],
+          details: { selector: requireSelector(body), mode },
         }, () => applyCleanup({
           codexHome,
           sessionId,

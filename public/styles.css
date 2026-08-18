@@ -711,6 +711,13 @@ button:disabled {
   color: var(--text, #202733);
 }
 
+.operation-history-details {
+  color: var(--text-muted, #5d6675);
+  font-size: 12px;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+
 .message-head,
 .change-head {
   align-items: center;

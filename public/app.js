@@ -478,6 +478,19 @@ function operationResultText(operation) {
   return '操作已完成。';
 }
 
+function operationDetailsText(operation) {
+  const details = operation.details || {};
+  const titles = details.sessionTitles || {};
+  const titleText = Object.entries(titles).map(([id, title]) => `${title} (${String(id).slice(0, 8)})`).join('、');
+  const parts = [];
+  if (titleText) parts.push(`会话：${titleText}`);
+  if (details.turnId) parts.push(`轮次：${details.turnId}`);
+  if (details.selector) parts.push(`轮次：${details.selector.turnId || (details.selector.index !== undefined ? `第 ${Number(details.selector.index) + 1} 轮` : '已选轮次')}`);
+  if (details.mode) parts.push(`模式：${details.mode === 'single' ? '仅此轮' : details.mode === 'truncate' ? '此轮及之后' : details.mode}`);
+  if (details.originalOperationId) parts.push(`来源操作：${String(details.originalOperationId).slice(0, 8)}`);
+  return parts.join(' · ');
+}
+
 function renderOperationHistory() {
   const history = state.operationHistory;
   const list = history?.operations || [];
@@ -491,17 +504,17 @@ function renderOperationHistory() {
   $('operationHistoryList').innerHTML = list.length ? list.map((operation) => {
     const [statusLabel, statusClass] = OPERATION_STATUS[operation.status] || [operation.status, ''];
     const sessionText = operation.sessionIds?.length
-      ? `${operation.sessionIds.length} 个会话 · ${operation.sessionIds.map((id) => String(id).slice(0, 8)).join('、')}`
+      ? `${operation.sessionIds.length} 个会话 · ${operation.sessionIds.map((id) => operation.details?.sessionTitles?.[id] || state.sessions.find((session) => session.id === id)?.title || String(id).slice(0, 8)).join('、')}`
       : '未指定会话';
     return `
       <article class="operation-history-entry">
         <div class="operation-history-main">
           <strong>${escapeHtml(operation.label || operation.kind)}</strong>
           <span class="operation-status ${statusClass}">${escapeHtml(statusLabel)}</span>
-          ${operation.canUndo ? '<span class="operation-reversible">可撤销</span>' : ''}
           ${operation.canUndo ? '<span class="operation-reversible">可回退此操作</span>' : ''}
         </div>
         <div class="operation-history-meta">${escapeHtml(formatDate(operation.startedAt))} · ${escapeHtml(sessionText)}</div>
+        ${operationDetailsText(operation) ? `<div class="operation-history-details">${escapeHtml(operationDetailsText(operation))}</div>` : ''}
         <p>${escapeHtml(operationResultText(operation))}</p>
         ${operation.canUndo && !operation.isLatest ? `<button type="button" class="btn btn-sm outline-accent" data-undo-operation="${escapeHtml(operation.id)}">回退此操作</button>` : ''}
       </article>`;
