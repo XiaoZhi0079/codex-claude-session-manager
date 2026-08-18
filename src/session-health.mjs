@@ -274,7 +274,7 @@ export async function diagnoseSessionHealth(codexHome, session, options = {}) {
     },
     {
       id: 'delete_session',
-      label: session.hasRollout ? '预览删除会话' : '预览删除残留',
+      label: session.hasRollout ? '删除会话' : '删除残留',
       available: Boolean(
         session.hasRollout
         || session.sqliteIndexed

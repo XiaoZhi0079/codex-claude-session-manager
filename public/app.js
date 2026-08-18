@@ -1073,7 +1073,7 @@ async function runHealthAction(actionId) {
   }
   if (actionId === 'open_backups') {
     state.backupManagerView = 'operation';
-    await openBackupManager();
+    await openBackupManager({ sessionId });
     return;
   }
   if (actionId === 'delete_session') {
@@ -2228,7 +2228,7 @@ async function applyVisibilitySystemBackup() {
   setAlert(`已回退 ${body.restoredRollouts} 个 rollout 和 ${body.restoredSqliteRows} 条 SQLite 的供应商字段；备份之后新增的会话和消息均已保留。当前状态安全点位于 ${body.safety.safetyDir}。请重新启动 Codex。`, 'success');
 }
 
-async function openBackupManager() {
+async function openBackupManager(options = {}) {
   setAlert('');
   if (isClaudePlatform()) {
     const deletionBody = await api('/api/claude-code/session-deletion-backups');
@@ -2239,6 +2239,11 @@ async function openBackupManager() {
     state.selectedBackupIds = new Set(
       [...state.selectedBackupIds].filter((id) => state.deletionBackups.some((backup) => backup.id === id)),
     );
+    if (options.sessionId) {
+      state.selectedBackupIds = new Set(state.deletionBackups
+        .filter((backup) => backup.sessions?.some((session) => session.id === options.sessionId))
+        .map((backup) => backup.id));
+    }
     state.backupInventorySignature = backupInventorySignature();
     renderBackupManager();
     $('backupManagerDialog').showModal();
@@ -2262,6 +2267,15 @@ async function openBackupManager() {
   state.selectedSystemBackupIds = new Set(
     [...state.selectedSystemBackupIds].filter((id) => state.systemBackups.some((backup) => backup.id === id)),
   );
+  if (options.sessionId) {
+    const matchesDeletion = state.deletionBackups.filter((backup) => backup.sessions?.some((session) => session.id === options.sessionId));
+    const matchesOperation = state.operationBackups.filter((backup) => backup.sessionId === options.sessionId || backup.sessions?.some((session) => session.id === options.sessionId));
+    const matchesSystem = state.systemBackups.filter((backup) => backup.sessionId === options.sessionId || backup.sessionIds?.includes(options.sessionId) || backup.sessions?.some((session) => session.id === options.sessionId));
+    state.selectedBackupIds = new Set(matchesDeletion.map((backup) => backup.id));
+    state.selectedOperationBackupIds = new Set(matchesOperation.map((backup) => backup.id));
+    state.selectedSystemBackupIds = new Set(matchesSystem.map((backup) => backup.id));
+    state.backupManagerView = matchesDeletion.length ? 'deletion' : (matchesOperation.length ? 'operation' : 'system');
+  }
   state.backupInventorySignature = backupInventorySignature();
   renderBackupManager();
   $('backupManagerDialog').showModal();
