@@ -696,6 +696,21 @@ button:disabled {
   font-size: 10px;
 }
 
+.backup-layer-help {
+  background: var(--surface-muted, #f7f8fa);
+  border: 1px solid var(--border, #d8dde5);
+  border-radius: 6px;
+  color: var(--text-muted, #5d6675);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 10px 0;
+  padding: 9px 11px;
+}
+
+.backup-layer-help strong {
+  color: var(--text, #202733);
+}
+
 .message-head,
 .change-head {
   align-items: center;

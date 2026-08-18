@@ -60,6 +60,13 @@
             <dl class="metric-doc"><dt>仅 SQLite</dt><dd>数据库里还有标题或索引记录，但 rollout 正文已经不存在。没有匹配备份时无法继续阅读原对话。</dd></dl>
             <dl class="metric-doc"><dt>可恢复</dt><dd>正文当前缺失，但工具找到了会话 ID 一致的会话备份，可以通过备份管理恢复。</dd></dl>
           </div>
+          <p class="docs-subhead">轮次状态与错误删除边界</p>
+          <div class="metric-docs">
+            <dl class="metric-doc"><dt>正常完成</dt><dd>rollout 出现 <code>task_complete</code> 且没有错误。</dd></dl>
+            <dl class="metric-doc"><dt>错误 / 中止</dt><dd><code>task_complete.error</code> 表示错误，<code>turn_aborted.reason</code> 表示中止；如果这些事件在 rollout 中，它们就是正式对话正文的一部分。</dd></dl>
+            <dl class="metric-doc"><dt>可删除的孤立错误</dt><dd>只有 SQLite 的 <code>thread_turns.error_json</code> 有失败记录、rollout 却没有相同 <code>turn_id</code> 时，才可单独删除。它是分页历史残留，不修改正式对话。</dd></dl>
+            <dl class="metric-doc"><dt>不可单独删除的错误</dt><dd>rollout 中已有的错误不能只清空错误字段；如需删除，必须删除完整轮次或从该轮开始截断，这会影响 Codex 续聊上下文。</dd></dl>
+          </div>
         </div>
       </dialog>
 
@@ -74,7 +81,7 @@
           </div>
           <div class="operation-runtime-rules">
             <strong>Codex 运行时规则</strong>
-            <span>编辑、清理、删除和普通会话恢复只需关闭目标会话；全量可见性修复及其回退会跨会话修改 SQLite，必须完全退出 Codex。永久删除备份不可撤销。</span>
+            <span>每个已完成操作都是独立原子操作，可在对应记录旁直接回退；编辑、清理、删除和普通会话恢复只需关闭目标会话。全量可见性修复及其回退会跨会话修改 SQLite，必须完全退出 Codex。永久删除备份不可撤销。</span>
           </div>
           <div id="operationHistoryList" class="operation-history-list"></div>
           <section id="operationUndoPanel" class="operation-undo-panel hidden">
@@ -198,6 +205,9 @@
             <button id="deletionBackupsTab" type="button" class="active" role="tab" aria-selected="true">会话删除备份</button>
             <button id="operationBackupsTab" type="button" role="tab" aria-selected="false">轮次操作快照</button>
             <button id="systemBackupsTab" type="button" role="tab" aria-selected="false">系统安全备份</button>
+          </div>
+          <div class="backup-layer-help">
+            <strong>三类备份怎么选：</strong><span>会话删除备份＝恢复整个被删除会话；轮次操作快照＝恢复某次编辑/清理前的 rollout 与相关数据；系统安全备份＝可见性修复等跨文件操作的整体安全点。单个操作的回退优先在“操作历史”中进行。</span>
           </div>
           <div class="backup-auto-detect" aria-live="polite">
             <label><input id="backupAutoDetectEnabled" type="checkbox" checked><span>自动检测备份和恢复目标变化（只读）</span></label>

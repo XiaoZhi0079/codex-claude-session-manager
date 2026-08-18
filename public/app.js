@@ -499,11 +499,11 @@ function renderOperationHistory() {
           <strong>${escapeHtml(operation.label || operation.kind)}</strong>
           <span class="operation-status ${statusClass}">${escapeHtml(statusLabel)}</span>
           ${operation.canUndo ? '<span class="operation-reversible">可撤销</span>' : ''}
-          ${operation.canRestore ? '<span class="operation-reversible">可单独恢复</span>' : ''}
+          ${operation.canUndo ? '<span class="operation-reversible">可回退此操作</span>' : ''}
         </div>
         <div class="operation-history-meta">${escapeHtml(formatDate(operation.startedAt))} · ${escapeHtml(sessionText)}</div>
         <p>${escapeHtml(operationResultText(operation))}</p>
-        ${operation.canRestore ? `<button type="button" class="btn btn-sm outline-accent" data-restore-history-operation="${escapeHtml(operation.id)}">恢复这条失败轮次</button>` : ''}
+        ${operation.canUndo && !operation.isLatest ? `<button type="button" class="btn btn-sm outline-accent" data-undo-operation="${escapeHtml(operation.id)}">回退此操作</button>` : ''}
       </article>`;
   }).join('') : '<div class="list-status">还没有写操作记录。预览、扫描和刷新不会记入这里。</div>';
 
@@ -514,7 +514,7 @@ function renderOperationHistory() {
   $('undoLatestOperationButton').disabled = true;
   if (canUndo) {
     $('operationUndoTitle').textContent = `撤销最近操作：${latest.label}`;
-    $('operationUndoDescription').textContent = '只撤销当前列表中的最新写操作；工具会再次校验文件哈希和数据库状态，发生冲突时不会覆盖。';
+    $('operationUndoDescription').textContent = '回退最新写操作；也可以在下方每条已完成操作旁单独回退。工具会再次校验快照和当前状态，发生冲突时不会覆盖。';
   }
 }
 
@@ -529,6 +529,18 @@ async function restoreHistoryErrorOperation(operationId) {
   if ($('operationHistoryDialog').open) renderOperationHistory();
   if (state.selectedSession) await loadTurns();
   setAlert(`已恢复分页历史失败轮次 ${result.turnId || ''}。`, 'success');
+}
+
+async function undoOperation(operationId) {
+  if (!operationId || !window.confirm('回退这条操作？工具会重新校验安全快照与当前数据，冲突时不会覆盖。')) return;
+  const result = await api('/api/operation-history/undo', {
+    method: 'POST',
+    body: JSON.stringify({ operationId, confirmation: 'UNDO' }),
+  });
+  state.operationHistory = await api('/api/operation-history?limit=100');
+  renderOperationHistory();
+  if (state.selectedSession) await loadTurns();
+  setAlert(`已回退操作 ${operationId.slice(0, 8)}。`, 'success');
 }
 
 async function openOperationHistory() {
@@ -2776,6 +2788,11 @@ $('detectBackupChangesButton').addEventListener('click', () => detectBackupChang
 $('operationHistoryButton').addEventListener('click', () => openOperationHistory().catch((error) => setAlert(error.message)));
 $('closeOperationHistoryButton').addEventListener('click', closeOperationHistory);
 $('operationHistoryList').addEventListener('click', (event) => {
+  const undo = event.target.closest('[data-undo-operation]');
+  if (undo) {
+    undoOperation(undo.dataset.undoOperation).catch((error) => setAlert(error.message));
+    return;
+  }
   const button = event.target.closest('[data-restore-history-operation]');
   if (button) restoreHistoryErrorOperation(button.dataset.restoreHistoryOperation).catch((error) => setAlert(error.message));
 });

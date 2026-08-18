@@ -418,6 +418,30 @@ export function createCleanerServer(options = {}) {
         return;
       }
 
+      if (requestUrl.pathname === '/api/operation-history/undo' && request.method === 'POST') {
+        const body = await readJsonRequest(request);
+        if (body.confirmation !== 'UNDO') {
+          throw new CleanerError('UNDO_CONFIRMATION_REQUIRED', 'Type UNDO to roll back this operation.', 400);
+        }
+        const history = await operationHistory.list({ limit: 500 });
+        const original = history.operations.find((operation) => operation.id === body.operationId);
+        if (!original || !original.canUndo || !original.undo) {
+          throw new CleanerError('UNDO_NOT_AVAILABLE', 'This operation cannot be rolled back.', 409);
+        }
+        const result = await executeRecordedOperation({
+          kind: 'undo',
+          label: `回退：${original.label}`,
+          sessionIds: original.sessionIds,
+          details: { originalOperationId: original.id },
+        }, () => executeUndo(original.undo), (undoResult) => ({
+          result: { originalOperationId: original.id, restartRequired: Boolean(undoResult.restartRequired) },
+        }));
+        await operationHistory.markUndone(original.id, result.operationId);
+        registryCache = null;
+        sendJson(response, 200, result);
+        return;
+      }
+
       if (requestUrl.pathname === '/api/operation-history/restore-history-error' && request.method === 'POST') {
         const body = await readJsonRequest(request);
         if (body.confirmation !== 'RESTORE') {

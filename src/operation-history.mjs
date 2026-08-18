@@ -179,7 +179,7 @@ export function createOperationHistory(options = {}) {
     const operations = allOperations.slice(0, limit).map((operation, index) => ({
       ...operation,
       isLatest: index === 0,
-      canUndo: index === 0 && operation.status === 'completed' && Boolean(operation.undo),
+      canUndo: operation.status === 'completed' && Boolean(operation.undo),
       canRestore: operation.kind === 'history_error_delete'
         && operation.status === 'completed'
         && operation.undo?.type === 'history_turn_restore',

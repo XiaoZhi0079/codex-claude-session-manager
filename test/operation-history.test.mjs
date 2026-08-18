@@ -27,7 +27,7 @@ test('operation history records completed work and exposes only the latest opera
   assert.equal(listed.operations.length, 2);
   assert.equal(listed.latest.id, second);
   assert.equal(listed.latest.canUndo, false);
-  assert.equal(listed.operations[1].canUndo, false);
+  assert.equal(listed.operations[1].canUndo, true);
   assert.equal(listed.operations[1].undo.type, 'rollout_restore');
 });
 
@@ -51,7 +51,7 @@ test('history error deletions remain individually restorable after newer operati
 
   const listed = await history.list();
   const operation = listed.operations.find((item) => item.id === deletion);
-  assert.equal(operation.canUndo, false);
+  assert.equal(operation.canUndo, true);
   assert.equal(operation.canRestore, true);
 });
 
