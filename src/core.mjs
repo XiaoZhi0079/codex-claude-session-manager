@@ -5,6 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 
+import {
+  invalidateThreadHistory,
+  prepareThreadHistoryMutation,
+  withTargetSessionLocks,
+} from './codex-thread-history.mjs';
+
 const MODERN_TURN_START_TYPE = 'task_started';
 const MODERN_TURN_END_TYPE = 'task_complete';
 const LEGACY_TURN_START_TYPE = 'turn_context';
@@ -481,6 +487,64 @@ export function buildTurnMessageDetail(records, selector) {
   };
 }
 
+export function buildCompactConversationPreview(records, rawOptions = {}) {
+  const offsetValue = Number(rawOptions.offset ?? 0);
+  const limitValue = Number(rawOptions.limit ?? 80);
+  const offset = Number.isInteger(offsetValue) && offsetValue >= 0 ? offsetValue : 0;
+  const limit = Number.isInteger(limitValue) ? Math.min(Math.max(limitValue, 1), 200) : 80;
+  const maxMessageChars = 16_000;
+  const turns = listTurnsFromRecords(records);
+  const messages = [];
+  let truncatedMessageCount = 0;
+  let turnCursor = 0;
+  for (let recordIndex = 0; recordIndex < records.length && turnCursor < turns.length; recordIndex += 1) {
+    while (turnCursor < turns.length && recordIndex > turns[turnCursor].endIndex) turnCursor += 1;
+    const turn = turns[turnCursor];
+    if (!turn || recordIndex < turn.startIndex || recordIndex > turn.endIndex) continue;
+    const record = records[recordIndex];
+    const location = getMessageLocation(record.data);
+    if (!location) continue;
+    const role = location.container.role;
+    if (role !== 'user' && role !== 'assistant') continue;
+    const phase = typeof location.container.phase === 'string' && location.container.phase
+      ? location.container.phase
+      : null;
+    if (role === 'assistant' && !VISIBLE_ASSISTANT_PHASES.has(phase)) continue;
+    const expectedType = role === 'user' ? 'input_text' : 'output_text';
+    const sourceText = location.container.content
+      .filter((part) => part?.type === expectedType && typeof part.text === 'string')
+      .map((part) => part.text)
+      .join('\n\n')
+      .trim();
+    if (!sourceText || (role === 'user' && isInjectedUserContext(sourceText))) continue;
+    const truncated = sourceText.length > maxMessageChars;
+    if (truncated) truncatedMessageCount += 1;
+    messages.push({
+      role,
+      phase,
+      lineNumber: record.lineNumber,
+      turnIndex: turn.index,
+      text: truncated ? `${sourceText.slice(0, maxMessageChars)}\n\n[内容过长，已截断]` : sourceText,
+      truncated,
+    });
+  }
+
+  const end = Math.min(messages.length, offset + limit);
+  return {
+    messages: messages.slice(offset, end),
+    recordCount: records.length,
+    turnCount: turns.length,
+    messageCount: messages.length,
+    truncatedMessageCount,
+    page: {
+      offset,
+      limit,
+      nextOffset: end < messages.length ? end : null,
+      previousOffset: offset > 0 ? Math.max(0, offset - limit) : null,
+    },
+  };
+}
+
 function validateMessageEdits(records, selector, edits) {
   if (!Array.isArray(edits) || edits.length === 0) {
     throw new CleanerError('INVALID_EDITS', 'At least one message edit is required.', 400);
@@ -723,14 +787,23 @@ export async function previewMessageEdits({ rolloutPath, selector, edits, source
   };
 }
 
-export async function applyMessageEdits({
-  rolloutPath,
-  selector,
-  edits,
-  sourceHash,
-  backupRoot,
-  now = new Date(),
-}) {
+export async function applyMessageEdits(options) {
+  const {
+    rolloutPath,
+    codexHome,
+    sessionId,
+    selector,
+    edits,
+    sourceHash,
+    backupRoot,
+    now = new Date(),
+  } = options;
+  if (codexHome && sessionId && !options.sessionLocksHeld) {
+    return withTargetSessionLocks(codexHome, [sessionId], {
+      ...options,
+      errorFactory: (code, message, status, details) => new CleanerError(code, message, status, details),
+    }, () => applyMessageEdits({ ...options, sessionLocksHeld: true }));
+  }
   const source = await readFile(rolloutPath, 'utf8');
   const sourceHashBefore = requireMatchingSourceHash(source, sourceHash);
   const records = parseJsonl(source, rolloutPath);
@@ -746,6 +819,9 @@ export async function applyMessageEdits({
   if (!backupFile) {
     throw new CleanerError('BACKUP_FAILED', 'The rollout could not be backed up.', 500, { rolloutPath });
   }
+  const threadHistory = codexHome && sessionId
+    ? await prepareThreadHistoryMutation(codexHome, [sessionId], backup.backupDir, options)
+    : null;
 
   const newline = source.includes('\r\n') ? '\r\n' : '\n';
   const trailingNewline = /\r?\n$/.test(source);
@@ -757,6 +833,12 @@ export async function applyMessageEdits({
     const validatedSource = await readFile(rolloutPath, 'utf8');
     const validationRecords = parseJsonl(validatedSource, rolloutPath);
     const sourceHashAfter = hashRolloutSource(validatedSource);
+    const historyInvalidation = codexHome && sessionId
+      ? await invalidateThreadHistory(codexHome, [sessionId], options)
+      : null;
+    if (typeof options.onThreadHistoryInvalidated === 'function') {
+      await options.onThreadHistoryInvalidated({ rolloutPath, validatedSource, historyInvalidation });
+    }
     return {
       rolloutPath,
       backupDir: backup.backupDir,
@@ -765,6 +847,7 @@ export async function applyMessageEdits({
       preview,
       sourceHashBefore,
       sourceHashAfter,
+      threadHistory: { ...threadHistory, invalidation: historyInvalidation },
       validation: {
         recordCount: validationRecords.length,
         validJsonl: true,
@@ -789,13 +872,22 @@ export async function applyMessageEdits({
   }
 }
 
-export async function restoreRolloutBackup({
-  rolloutPath,
-  backupPath,
-  expectedCurrentHash,
-  backupRoot,
-  now = new Date(),
-}) {
+export async function restoreRolloutBackup(options) {
+  const {
+    rolloutPath,
+    codexHome,
+    sessionId,
+    backupPath,
+    expectedCurrentHash,
+    backupRoot,
+    now = new Date(),
+  } = options;
+  if (codexHome && sessionId && !options.sessionLocksHeld) {
+    return withTargetSessionLocks(codexHome, [sessionId], {
+      ...options,
+      errorFactory: (code, message, status, details) => new CleanerError(code, message, status, details),
+    }, () => restoreRolloutBackup({ ...options, sessionLocksHeld: true }));
+  }
   if (typeof backupPath !== 'string' || typeof backupRoot !== 'string') {
     throw new CleanerError('INVALID_BACKUP_PATH', 'A valid editor backup path is required.', 400);
   }
@@ -821,6 +913,9 @@ export async function restoreRolloutBackup({
   if (!restorePointFile) {
     throw new CleanerError('BACKUP_FAILED', 'The current rollout could not be backed up before restore.', 500);
   }
+  const threadHistory = codexHome && sessionId
+    ? await prepareThreadHistoryMutation(codexHome, [sessionId], restorePoint.backupDir, options)
+    : null;
 
   let changed = false;
   try {
@@ -828,6 +923,12 @@ export async function restoreRolloutBackup({
     changed = true;
     const restoredSource = await readFile(rolloutPath, 'utf8');
     const validationRecords = parseJsonl(restoredSource, rolloutPath);
+    const historyInvalidation = codexHome && sessionId
+      ? await invalidateThreadHistory(codexHome, [sessionId], options)
+      : null;
+    if (typeof options.onThreadHistoryInvalidated === 'function') {
+      await options.onThreadHistoryInvalidated({ rolloutPath, validatedSource: restoredSource, historyInvalidation });
+    }
     return {
       rolloutPath,
       restoredFrom: resolvedBackup,
@@ -835,6 +936,7 @@ export async function restoreRolloutBackup({
       restorePointFile,
       sourceHashBefore,
       sourceHashAfter: hashRolloutSource(restoredSource),
+      threadHistory: { ...threadHistory, invalidation: historyInvalidation },
       validation: {
         recordCount: validationRecords.length,
         validJsonl: true,
@@ -859,14 +961,23 @@ export async function restoreRolloutBackup({
   }
 }
 
-export async function applyCleanup({
-  rolloutPath,
-  selector,
-  mode = CLEANUP_MODES.TRUNCATE,
-  sourceHash,
-  backupRoot,
-  now = new Date(),
-}) {
+export async function applyCleanup(options) {
+  const {
+    rolloutPath,
+    codexHome,
+    sessionId,
+    selector,
+    mode = CLEANUP_MODES.TRUNCATE,
+    sourceHash,
+    backupRoot,
+    now = new Date(),
+  } = options;
+  if (codexHome && sessionId && !options.sessionLocksHeld) {
+    return withTargetSessionLocks(codexHome, [sessionId], {
+      ...options,
+      errorFactory: (code, message, status, details) => new CleanerError(code, message, status, details),
+    }, () => applyCleanup({ ...options, sessionLocksHeld: true }));
+  }
   const source = await readFile(rolloutPath, 'utf8');
   const sourceHashBefore = requireMatchingSourceHash(source, sourceHash);
   const records = parseJsonl(source, rolloutPath);
@@ -882,6 +993,9 @@ export async function applyCleanup({
   if (!backupFile) {
     throw new CleanerError('BACKUP_FAILED', 'The rollout could not be backed up.', 500, { rolloutPath });
   }
+  const threadHistory = codexHome && sessionId
+    ? await prepareThreadHistoryMutation(codexHome, [sessionId], backup.backupDir, options)
+    : null;
 
   const newline = source.includes('\r\n') ? '\r\n' : '\n';
   const trailingNewline = /\r?\n$/.test(source);
@@ -892,6 +1006,12 @@ export async function applyCleanup({
     changed = true;
     const validatedSource = await readFile(rolloutPath, 'utf8');
     const validationRecords = parseJsonl(validatedSource, rolloutPath);
+    const historyInvalidation = codexHome && sessionId
+      ? await invalidateThreadHistory(codexHome, [sessionId], options)
+      : null;
+    if (typeof options.onThreadHistoryInvalidated === 'function') {
+      await options.onThreadHistoryInvalidated({ rolloutPath, validatedSource, historyInvalidation });
+    }
     return {
       rolloutPath,
       backupDir: backup.backupDir,
@@ -900,6 +1020,7 @@ export async function applyCleanup({
       preview,
       sourceHashBefore,
       sourceHashAfter: hashRolloutSource(validatedSource),
+      threadHistory: { ...threadHistory, invalidation: historyInvalidation },
       validation: {
         recordCount: validationRecords.length,
         validJsonl: true,

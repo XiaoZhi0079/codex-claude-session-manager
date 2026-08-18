@@ -18,6 +18,7 @@ const state = {
   editPreview: null,
   lastEdit: null,
   cleanupSourceHash: null,
+  cleanupTargetActive: false,
   currentProvider: null,
   registrySummary: null,
   visibilityPlan: null,
@@ -39,6 +40,13 @@ const state = {
   selectedRestoreSessionIds: new Set(),
   visibleRestoreSessionIds: [],
   backupRestorePlan: null,
+  backupContent: null,
+  backupContentSessionId: null,
+  backupContentOffset: 0,
+  backupAutoDetectTimer: null,
+  backupAutoDetectBusy: false,
+  backupInventorySignature: null,
+  backupRestoreDetectionSignature: null,
   operationHistory: null,
 };
 
@@ -459,7 +467,7 @@ function operationResultText(operation) {
   if (operation.status === 'undone') return `已由操作 ${String(operation.undoOperationId || '').slice(0, 8)} 撤销。`;
   const result = operation.result || {};
   if (result.claudeRestartRecommended || result.claudeRefreshRecommended) return 'Claude 会话数据已写入；需要退出或重新打开 Claude Code 才能看到最终状态。';
-  if (result.restartRequired || result.codexRefreshRecommended) return '数据已写入；需要刷新或重新打开 Codex 才能看到最终状态。';
+  if (result.restartRequired || result.codexRefreshRecommended) return '数据已写入；重新打开相关目标会话时 Codex 会读取最终状态，其他窗口无需退出。';
   if (result.count !== undefined) return `处理 ${result.count} 项。`;
   if (result.deleted) return '删除已完成，并已记录删除结果。';
   if (result.restored) return '恢复已完成。';
@@ -531,10 +539,10 @@ async function undoLatestOperation() {
   renderOperationHistory();
   await loadSessions();
   const refreshMessage = result.restartRequired
-    ? ' 请重新启动 Codex 以读取恢复后的状态。'
+    ? ' 请重新打开相关目标会话，以读取恢复后的状态；其他 Codex 窗口无需退出。'
     : (result.claudeRestartRecommended
       ? ' 请退出或重新打开 Claude Code，以读取恢复后的会话。'
-      : ' 请刷新或重新打开相关 Codex 会话。');
+      : ' 请重新打开相关目标会话；其他 Codex 窗口无需退出。');
   setAlert(`已撤销“${latest.label}”。${refreshMessage}`, 'success');
 }
 
@@ -555,6 +563,7 @@ function setOperationView(operation) {
 function resetCleanupPreview() {
   state.preview = null;
   state.cleanupSourceHash = null;
+  state.cleanupTargetActive = false;
   $('previewTurn').textContent = '-';
   $('previewLines').textContent = '-';
   $('previewRecords').textContent = '-';
@@ -589,6 +598,8 @@ function clearEditPreview() {
   state.editPreview = null;
   $('editPreview').classList.add('hidden');
   $('editChanges').innerHTML = '';
+  $('editSessionWarning').textContent = '';
+  $('editSessionWarning').className = 'mode-warning hidden';
   $('editConfirmation').value = '';
   $('applyEditButton').disabled = true;
 }
@@ -1063,7 +1074,12 @@ function renderCleanupPreview(body) {
     : '无';
   $('previewBackup').textContent = body.backupRoot || '-';
   if (state.operation === 'cleanup') $('modeBadge').textContent = isSingle ? '删除模式 · B' : '删除模式 · A';
-  if (isClaudePlatform()) {
+  const targetActive = !isClaudePlatform() && Boolean(body.targetSessionLock?.activeSessionIds?.length);
+  state.cleanupTargetActive = targetActive;
+  if (targetActive) {
+    $('modeWarning').textContent = '所选 Codex 会话仍在窗口中打开。请只关闭这个目标会话，然后重新预览；其他 Codex 窗口可以继续使用。';
+    $('modeWarning').className = 'mode-warning warning';
+  } else if (isClaudePlatform()) {
     const external = preview.externalArtifacts;
     const parts = [];
     if (external?.toolResultFiles?.length) parts.push(`${external.toolResultFiles.length} 个外置工具结果文件`);
@@ -1076,8 +1092,11 @@ function renderCleanupPreview(body) {
       $('modeWarning').className = 'mode-warning hidden';
     }
   } else if (isSingle && preview.keepsLaterTurns) {
-    $('modeWarning').textContent = `警告：后续 ${preview.laterTurnCount} 轮将被保留，但其中可能引用本轮产生的上下文。`;
+    $('modeWarning').textContent = `警告：后续 ${preview.laterTurnCount} 轮将被保留，但其中可能引用本轮产生的上下文。只需关闭目标会话，其他 Codex 窗口可以继续使用。`;
     $('modeWarning').className = 'mode-warning warning';
+  } else if (!isClaudePlatform()) {
+    $('modeWarning').textContent = '只需关闭目标会话，其他 Codex 窗口可以继续使用。应用后重新打开目标会话，Codex 会从 rollout 重建分页历史。';
+    $('modeWarning').className = 'mode-warning';
   } else {
     $('modeWarning').textContent = '';
     $('modeWarning').className = 'mode-warning hidden';
@@ -1423,8 +1442,10 @@ function editPayload() {
   return [...state.edits.values()];
 }
 
-function renderEditPreview(preview) {
-  state.editPreview = preview;
+function renderEditPreview(body) {
+  const preview = body.preview;
+  const targetActive = Boolean(body.targetSessionLock?.activeSessionIds?.length);
+  state.editPreview = { ...preview, blockedByActiveTarget: targetActive };
   $('editChanges').innerHTML = preview.changes.map((change) => `
     <article class="edit-change">
       <div class="change-head">
@@ -1442,6 +1463,10 @@ function renderEditPreview(preview) {
     </article>
   `).join('');
   $('editPreview').classList.remove('hidden');
+  $('editSessionWarning').textContent = targetActive
+    ? '所选 Codex 会话仍在窗口中打开。请只关闭这个目标会话，然后重新预览；其他 Codex 窗口无需退出。'
+    : '应用后工具会使所选会话的分页历史投影失效；重新打开该会话时 Codex 会从 rollout 重建。其他 Codex 窗口可保持打开。';
+  $('editSessionWarning').className = `mode-warning${targetActive ? ' warning' : ''}`;
   $('editConfirmation').value = '';
   $('applyEditButton').disabled = true;
 }
@@ -1643,7 +1668,7 @@ async function previewEdits() {
       edits: editPayload(),
     }),
   });
-  renderEditPreview(body.preview);
+  renderEditPreview(body);
 }
 
 async function applyEdits() {
@@ -1665,7 +1690,7 @@ async function applyEdits() {
   };
   await loadTurns();
   await selectTurn(turnIndex, { preserveLastEdit: true, operation: 'messages' });
-  setAlert('消息修改完成，原始 rollout 已备份。', 'success');
+  setAlert('消息修改完成，原始 rollout 已备份；如存在分页历史，也已保存安全副本。重新打开目标会话时 Codex 会重建历史。', 'success');
 }
 
 async function restoreLastEdit() {
@@ -1682,7 +1707,7 @@ async function restoreLastEdit() {
   state.lastEdit = null;
   await loadTurns();
   await selectTurn(turnIndex, { operation: 'messages' });
-  setAlert(`已撤销本次编辑；恢复前版本保存在 ${body.restorePointFile}`, 'success');
+  setAlert(`已撤销本次编辑；恢复前版本保存在 ${body.restorePointFile}。重新打开目标会话时 Codex 会重建历史。`, 'success');
 }
 
 async function applyCleanup() {
@@ -1723,7 +1748,7 @@ async function applyCleanup() {
   await selectSession(state.selectedSession.id);
   $('result').textContent = summary;
   setOperationView('cleanup');
-  setAlert('清理完成，原始文件已备份。', 'success');
+  setAlert('清理完成，原始 rollout 已备份；如存在分页历史，也已保存安全副本。重新打开目标会话时 Codex 会重建历史。', 'success');
 }
 
 function renderVisibilityPlan(plan) {
@@ -1772,16 +1797,6 @@ async function previewVisibilityRepair() {
 }
 
 async function applyVisibilityRepair() {
-  let previousVisibilityBackup = null;
-  try {
-    const listed = await api('/api/system-backups');
-    previousVisibilityBackup = listed.backups
-      .filter((backup) => backup.type === 'visibility_sync')
-      .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0] || null;
-  } catch {
-    // Backup discovery must not block the visibility repair itself.
-  }
-
   const body = await api('/api/visibility/apply', {
     method: 'POST',
     body: JSON.stringify({
@@ -1807,38 +1822,8 @@ async function applyVisibilityRepair() {
     setAlert('所有可恢复会话已经对当前 Codex 供应商可见。', 'success');
     return;
   }
-
-  let backupMessage = '';
-  if (previousVisibilityBackup) {
-    const previousTime = new Date(previousVisibilityBackup.createdAt).toLocaleString('zh-CN');
-    const shouldDelete = window.confirm(
-      `本次统一已生成新备份。\n\n`
-      + `是否永久删除上一轮备份？\n`
-      + `时间：${previousTime}\n`
-      + `大小：${formatBytes(previousVisibilityBackup.sizeBytes)}\n`
-      + `路径：${displayPath(previousVisibilityBackup.path)}\n\n`
-      + '取消则继续保留该备份。',
-    );
-    if (shouldDelete) {
-      try {
-        const deleted = await api('/api/system-backups/delete', {
-          method: 'POST',
-          body: JSON.stringify({
-            backupIds: [previousVisibilityBackup.id],
-            confirmation: 'ERASE',
-          }),
-        });
-        backupMessage = `已删除上一轮备份，释放 ${formatBytes(deleted.summary.sizeBytes)}。`;
-      } catch (error) {
-        backupMessage = `上一轮备份未删除：${error.message}`;
-      }
-    } else {
-      backupMessage = '已保留上一轮备份。';
-    }
-  }
-
   setAlert(
-    `会话统一完成。请重新启动 Codex；活跃或缺少正文的会话已安全跳过。${backupMessage ? ` ${backupMessage}` : ''}`,
+    `会话统一完成，回退备份已保留在“系统安全备份”。请重新启动 Codex；无法自动处理的会话未被修改。`,
     'success',
   );
 }
@@ -1883,7 +1868,7 @@ function renderSessionDeletePlan(plan) {
     $('sessionDeleteWarning').classList.remove('hidden');
     return;
   }
-  $('sessionDeleteIntro').textContent = '从 Codex 中移除正文与索引；操作前会创建可恢复备份。Codex 运行中也可删除，完成后请刷新 Codex。';
+  $('sessionDeleteIntro').textContent = '从 Codex 中移除正文、索引和分页历史；只需关闭目标会话，其他 Codex 窗口可以继续使用。';
   $('sessionDeletePrimaryLabel').textContent = 'rollout 文件';
   $('sessionDeleteSecondaryLabel').textContent = 'SQLite 记录';
   $('sessionDeleteIndexLabel').textContent = '旧索引记录';
@@ -1910,8 +1895,11 @@ function renderSessionDeletePlan(plan) {
     : '备份并删除整个会话';
   const warning = $('sessionDeleteWarning');
   const messages = [];
-  if (plan.codexRunning) {
-    messages.push('检测到 Codex 仍在运行。删除可以继续；完成后请刷新或重新打开 Codex，以清除会话列表缓存。');
+  if (plan.blockedByActiveTarget) {
+    const count = plan.targetSessionLock?.activeSessionIds?.length || 1;
+    messages.push(`${count} 个目标会话仍在 Codex 中打开。请只关闭这些目标会话后重新预览；其他 Codex 窗口可以保持打开。`);
+  } else if (plan.codexRunning) {
+    messages.push('其他 Codex 窗口仍在运行，不影响本次删除。目标会话已关闭，工具会在写入期间锁定它。');
   }
   if (plan.summary.historicalBackupFiles) {
     messages.push(`将永久删除 ${plan.summary.historicalBackupFiles} 份由本工具生成的历史 JSONL 备份；这些文件不会再次备份。`);
@@ -1995,7 +1983,7 @@ async function applySessionDelete() {
   setAlert(
     deletedHistorical
       ? `已永久删除 ${deletedHistorical} 份历史备份，会话已从本工具列表移除。`
-      : `${deletedIds.length} 个会话已从 Codex 中删除；可恢复备份位于 ${backupDir}。${body.codexRefreshRecommended ? '请刷新或重新打开 Codex，以清除缓存中的旧会话。' : '下次打开 Codex 时将读取最新会话列表。'}`,
+      : `${deletedIds.length} 个会话已从 Codex 中删除；可恢复备份位于 ${backupDir}。其他 Codex 窗口无需退出。`,
     'success',
   );
 }
@@ -2019,12 +2007,12 @@ function renderBackupManager() {
     ? `${backups.length} 个 Claude 会话删除备份 · ${formatBytes(totalBytes)}`
     : `${backups.length} 个${viewLabel} · ${formatBytes(totalBytes)}`;
   $('backupManagerWarning').textContent = systemView
-    ? '系统安全备份由可见性修复或恢复操作产生，可能包含 SQLite 和多个会话文件。可见性备份支持安全恢复供应商状态；所有系统备份也可以永久删除。'
+    ? '左侧复选框仅用于永久删除。可见性修复备份保存当时被改动的 rollout 和一致的 SQLite 快照；回退时只恢复清单中的供应商字段，不用旧文件覆盖后来数据。'
     : (operationView
-    ? '这些快照由轮次清理、消息编辑或撤销操作自动产生。恢复会重建缺失会话，或用所选快照替换当前正文；替换前会自动生成安全点。永久删除后无法通过本工具找回。'
+    ? '左侧复选框仅用于永久删除。点击“查看备份”可直接阅读快照内容和恢复影响；替换当前正文前会自动生成安全点。'
     : (isClaudePlatform()
-      ? '这些备份包含 Claude 主 JSONL、外置工具结果、子代理、任务、文件历史、会话环境和原索引记录。可以选择会话恢复；永久删除后无法通过本工具找回。'
-      : '这些备份由“删除整个会话”功能产生。可选择其中的会话恢复；永久删除后无法通过本工具找回。'));
+      ? '左侧复选框仅用于永久删除。批量备份会列出其中的每个 Claude 会话；可直接查看/恢复单个会话，也可批量选择恢复。'
+      : '左侧复选框仅用于永久删除。批量备份会列出其中的每个会话；可直接查看/恢复单个会话，也可批量选择恢复。'));
   if (!backups.length) {
     $('backupManagerList').innerHTML = `<div class="list-status">暂无${isClaudePlatform() ? ' Claude 会话删除备份' : viewLabel}。</div>`;
   } else if (systemView) {
@@ -2032,11 +2020,11 @@ function renderBackupManager() {
       const checked = state.selectedSystemBackupIds.has(backup.id) ? ' checked' : '';
       return `
         <div class="backup-entry">
-          <input type="checkbox" aria-label="选择系统备份 ${escapeHtml(backup.typeLabel)}" data-system-backup-select="${escapeHtml(backup.id)}"${checked}>
+          <input type="checkbox" aria-label="选择系统备份 ${escapeHtml(backup.typeLabel)} 用于永久删除" title="选择用于永久删除" data-system-backup-select="${escapeHtml(backup.id)}"${checked}>
           <span class="backup-title">${escapeHtml(backup.typeLabel)}</span>
           <div class="backup-entry-actions">
             <strong>${formatBytes(backup.sizeBytes)}</strong>
-            ${backup.type === 'visibility_sync' ? `<button type="button" data-system-backup-restore="${escapeHtml(backup.id)}">查看/恢复</button>` : ''}
+            ${backup.type === 'visibility_sync' ? `<button type="button" data-system-backup-restore="${escapeHtml(backup.id)}">查看回退范围</button>` : ''}
           </div>
           <span class="backup-meta">${escapeHtml(formatDate(backup.createdAt))} · ${escapeHtml(backup.type)}</span>
           <span class="backup-path">${escapeHtml(displayPath(backup.path))}</span>
@@ -2049,11 +2037,11 @@ function renderBackupManager() {
       const title = backup.title || backup.sessionId;
       return `
         <div class="backup-entry">
-          <input type="checkbox" aria-label="选择快照 ${escapeHtml(title)}" data-operation-backup-select="${escapeHtml(backup.id)}"${checked}>
+          <input type="checkbox" aria-label="选择快照 ${escapeHtml(title)} 用于永久删除" title="选择用于永久删除" data-operation-backup-select="${escapeHtml(backup.id)}"${checked}>
           <span class="backup-title" title="${escapeHtml(title)}">${escapeHtml(title)}</span>
           <div class="backup-entry-actions">
             <strong>${formatBytes(backup.sizeBytes)}</strong>
-            <button type="button" data-operation-backup-open="${escapeHtml(backup.id)}">查看/恢复</button>
+            <button type="button" data-operation-backup-open="${escapeHtml(backup.id)}">查看备份</button>
           </div>
           <span class="backup-meta">${escapeHtml(backup.kindLabel)} · 生成于 ${escapeHtml(formatDate(backup.createdAt))} · ${escapeHtml(String(backup.sessionId).slice(0, 8))}</span>
           <span class="backup-path">${escapeHtml(backup.path)}</span>
@@ -2063,17 +2051,36 @@ function renderBackupManager() {
   } else {
     $('backupManagerList').innerHTML = backups.map((backup) => {
       const checked = state.selectedBackupIds.has(backup.id) ? ' checked' : '';
-      const allTitles = backup.sessions.map((session) => session.title || session.id);
-      const titles = `${allTitles.slice(0, 3).join('、')}${allTitles.length > 3 ? ` 等 ${allTitles.length} 个会话` : ''}`;
+      const multiSession = backup.sessions.length > 1;
+      const singleSession = backup.sessions[0] || null;
+      const packageTitle = multiSession
+        ? `批量删除备份 · ${backup.sessions.length} 个会话`
+        : (singleSession?.title || singleSession?.id || '单会话删除备份');
+      const sessionRows = multiSession ? `
+        <div class="backup-package-sessions">
+          ${backup.sessions.map((session) => `
+            <div class="backup-package-session">
+              <button type="button" class="backup-session-title-button" data-backup-session-open="${escapeHtml(backup.id)}" data-backup-session-id="${escapeHtml(session.id)}" title="只查看并恢复这个会话">${escapeHtml(session.title || '(untitled)')}</button>
+              <span class="session-id">${escapeHtml(session.id)}</span>
+              <button type="button" data-backup-session-open="${escapeHtml(backup.id)}" data-backup-session-id="${escapeHtml(session.id)}">查看/恢复此会话</button>
+            </div>
+          `).join('')}
+        </div>
+      ` : '';
       return `
-        <div class="backup-entry">
-          <input type="checkbox" aria-label="选择备份 ${escapeHtml(titles || backup.id)}" data-backup-select="${escapeHtml(backup.id)}"${checked}>
-          <span class="backup-title" title="${escapeHtml(titles)}">${escapeHtml(titles || backup.id)}</span>
+        <div class="backup-entry${multiSession ? ' backup-package-entry' : ''}">
+          <input type="checkbox" aria-label="选择备份包 ${escapeHtml(packageTitle)} 用于永久删除" title="选择整个备份包用于永久删除" data-backup-select="${escapeHtml(backup.id)}"${checked}>
+          ${multiSession
+            ? `<span class="backup-title">${escapeHtml(packageTitle)}</span>`
+            : `<button type="button" class="backup-session-title-button backup-title" data-backup-session-open="${escapeHtml(backup.id)}" data-backup-session-id="${escapeHtml(singleSession.id)}" title="查看并恢复这个会话">${escapeHtml(packageTitle)}</button>`}
           <div class="backup-entry-actions">
             <strong>${formatBytes(backup.sizeBytes)}</strong>
-            <button type="button" data-backup-open="${escapeHtml(backup.id)}">查看/恢复</button>
+            ${multiSession
+              ? `<button type="button" data-backup-batch-open="${escapeHtml(backup.id)}">批量选择恢复</button>`
+              : `<button type="button" data-backup-session-open="${escapeHtml(backup.id)}" data-backup-session-id="${escapeHtml(singleSession.id)}">查看/恢复</button>`}
           </div>
-          <span class="backup-meta">${escapeHtml(formatDate(backup.createdAt))} · ${backup.sessions.length} 个会话</span>
+          <span class="backup-meta">${escapeHtml(formatDate(backup.createdAt))} · ${multiSession ? '一次批量删除产生的备份包' : '单会话备份'}</span>
+          ${sessionRows}
           <span class="backup-path">${escapeHtml(backup.backupDir)}</span>
         </div>
       `;
@@ -2097,7 +2104,7 @@ async function previewVisibilitySystemBackup(backupId) {
   $('visibilityRestoreLegacy').textContent = plan.legacyManifest ? '是；SQLite 变更由备份数据库差异推断' : '否；清单明确记录了变更';
   const messages = [];
   if (plan.blockedByRunningCodex) messages.push('检测到 Codex 正在运行。请完全退出 Codex 后重新预览。');
-  if (plan.conflicts.length) messages.push(`检测到 ${plan.conflicts.length} 个当前状态冲突；为避免覆盖后续修改，本次禁止恢复。`);
+  if (plan.conflicts.length) messages.push(`检测到 ${plan.conflicts.length} 个当前状态冲突；为避免覆盖后续修改，本次整批回退已禁止，不会写入任何数据。`);
   if (!plan.rolloutUpdates.length && !plan.sqliteUpdates.length && !plan.conflicts.length) messages.push('当前状态已经与该备份一致，无需恢复。');
   $('visibilityRestoreWarning').textContent = messages.join(' ');
   $('visibilityRestoreWarning').classList.toggle('hidden', messages.length === 0);
@@ -2125,7 +2132,7 @@ async function applyVisibilitySystemBackup() {
   });
   closeVisibilityBackupRestore();
   await loadSessions();
-  setAlert(`已恢复 ${body.restoredRollouts} 个 rollout 和 ${body.restoredSqliteRows} 条 SQLite 供应商状态；安全点位于 ${body.safety.safetyDir}。请重新启动 Codex。`, 'success');
+  setAlert(`已回退 ${body.restoredRollouts} 个 rollout 和 ${body.restoredSqliteRows} 条 SQLite 的供应商字段；备份之后新增的会话和消息均已保留。当前状态安全点位于 ${body.safety.safetyDir}。请重新启动 Codex。`, 'success');
 }
 
 async function openBackupManager() {
@@ -2139,8 +2146,10 @@ async function openBackupManager() {
     state.selectedBackupIds = new Set(
       [...state.selectedBackupIds].filter((id) => state.deletionBackups.some((backup) => backup.id === id)),
     );
+    state.backupInventorySignature = backupInventorySignature();
     renderBackupManager();
     $('backupManagerDialog').showModal();
+    updateBackupAutoDetectTimer();
     return;
   }
   const [deletionBody, operationBody, systemBody] = await Promise.all([
@@ -2160,8 +2169,10 @@ async function openBackupManager() {
   state.selectedSystemBackupIds = new Set(
     [...state.selectedSystemBackupIds].filter((id) => state.systemBackups.some((backup) => backup.id === id)),
   );
+  state.backupInventorySignature = backupInventorySignature();
   renderBackupManager();
   $('backupManagerDialog').showModal();
+  updateBackupAutoDetectTimer();
 }
 
 function closeBackupManager() {
@@ -2169,6 +2180,110 @@ function closeBackupManager() {
   state.selectedOperationBackupIds = new Set();
   state.selectedSystemBackupIds = new Set();
   $('backupManagerDialog').close();
+  updateBackupAutoDetectTimer();
+}
+
+function backupInventorySignature() {
+  const compact = (items) => items.map((item) => ({
+    id: item.id,
+    createdAt: item.createdAt,
+    sizeBytes: item.sizeBytes,
+    sessions: item.sessions?.map((session) => session.id) || [],
+    type: item.type || item.kind || null,
+  }));
+  return JSON.stringify({
+    platform: state.platform,
+    deletion: compact(state.deletionBackups),
+    operation: compact(state.operationBackups),
+    system: compact(state.systemBackups),
+  });
+}
+
+async function refreshBackupInventoryReadOnly() {
+  if (isClaudePlatform()) {
+    const deletionBody = await api('/api/claude-code/session-deletion-backups');
+    state.deletionBackups = deletionBody.backups || [];
+    state.operationBackups = [];
+    state.systemBackups = [];
+  } else {
+    const [deletionBody, operationBody, systemBody] = await Promise.all([
+      api('/api/deletion-backups'),
+      api('/api/operation-backups'),
+      api('/api/system-backups'),
+    ]);
+    state.deletionBackups = deletionBody.backups || [];
+    state.operationBackups = operationBody.backups || [];
+    state.systemBackups = systemBody.backups || [];
+  }
+  state.selectedBackupIds = new Set(
+    [...state.selectedBackupIds].filter((id) => state.deletionBackups.some((backup) => backup.id === id)),
+  );
+  state.selectedOperationBackupIds = new Set(
+    [...state.selectedOperationBackupIds].filter((id) => state.operationBackups.some((backup) => backup.id === id)),
+  );
+  state.selectedSystemBackupIds = new Set(
+    [...state.selectedSystemBackupIds].filter((id) => state.systemBackups.some((backup) => backup.id === id)),
+  );
+}
+
+function backupRestoreRequest() {
+  const operationRestore = state.restoreBackupKind === 'operation';
+  const claudeRestore = state.restoreBackupKind === 'claude-deletion';
+  return {
+    endpoint: claudeRestore
+      ? '/api/claude-code/session-deletion-backups/restore-preview'
+      : (operationRestore ? '/api/operation-backups/restore-preview' : '/api/deletion-backups/restore-preview'),
+    body: operationRestore
+      ? { backupId: state.restoreBackup.id }
+      : { backupId: state.restoreBackup.id, sessionIds: [...state.selectedRestoreSessionIds] },
+  };
+}
+
+async function detectBackupChanges({ manual = false } = {}) {
+  if (state.backupAutoDetectBusy) return;
+  state.backupAutoDetectBusy = true;
+  if (manual) $('detectBackupChangesButton').disabled = true;
+  try {
+    if ($('backupManagerDialog').open) {
+      const before = state.backupInventorySignature || backupInventorySignature();
+      await refreshBackupInventoryReadOnly();
+      const after = backupInventorySignature();
+      state.backupInventorySignature = after;
+      if (before !== after) {
+        renderBackupManager();
+        $('backupAutoDetectStatus').textContent = `检测到备份变化，列表已更新 · ${new Date().toLocaleTimeString()}`;
+      } else {
+        $('backupAutoDetectStatus').textContent = `未发现变化 · ${new Date().toLocaleTimeString()} · 不会自动写入`;
+      }
+    }
+    if ($('backupRestoreDialog').open && state.restoreBackup && state.selectedRestoreSessionIds.size) {
+      const request = backupRestoreRequest();
+      const plan = await api(request.endpoint, { method: 'POST', body: JSON.stringify(request.body) });
+      if (state.backupRestoreDetectionSignature && state.backupRestoreDetectionSignature !== plan.planToken) {
+        renderBackupRestorePlan(plan);
+        const sessionId = state.backupContentSessionId || (state.selectedRestoreSessionIds.size === 1
+          ? [...state.selectedRestoreSessionIds][0]
+          : null);
+        if (sessionId) await loadBackupContent(sessionId, state.backupContentOffset);
+        setAlert('检测到恢复目标发生变化，已重新生成只读预览；请重新核对后确认。');
+      }
+      state.backupRestoreDetectionSignature = plan.planToken;
+    }
+  } catch (error) {
+    if ($('backupManagerDialog').open) $('backupAutoDetectStatus').textContent = `检测失败：${error.message}`;
+    if (manual) setAlert(`只读检测失败：${error.message}`);
+  } finally {
+    state.backupAutoDetectBusy = false;
+    if (manual) $('detectBackupChangesButton').disabled = false;
+  }
+}
+
+function updateBackupAutoDetectTimer() {
+  clearInterval(state.backupAutoDetectTimer);
+  state.backupAutoDetectTimer = null;
+  const dialogOpen = $('backupManagerDialog').open || $('backupRestoreDialog').open;
+  if (!dialogOpen || !$('backupAutoDetectEnabled').checked) return;
+  state.backupAutoDetectTimer = setInterval(() => detectBackupChanges(), 15_000);
 }
 
 async function deleteSelectedBackups() {
@@ -2224,9 +2339,102 @@ function updateRestoreSelectionControls() {
 
 function resetBackupRestorePlan() {
   state.backupRestorePlan = null;
+  state.backupRestoreDetectionSignature = null;
   $('backupRestorePlan').classList.add('hidden');
   $('backupRestoreConfirmation').value = '';
   $('applyBackupRestoreButton').disabled = true;
+}
+
+function resetBackupContent() {
+  state.backupContent = null;
+  state.backupContentSessionId = null;
+  state.backupContentOffset = 0;
+  $('backupContentMeta').classList.add('hidden');
+  $('backupContentState').className = 'backup-content-state';
+  $('backupContentState').textContent = '请选择';
+  $('backupContentSummary').textContent = '选择一个备份会话后，将在这里显示实际保存的用户与助手消息。';
+  $('backupContentMessages').innerHTML = '<div class="list-status">尚未选择要查看的会话。</div>';
+  $('backupContentPagination').classList.add('hidden');
+}
+
+function backupContentEndpoint() {
+  if (state.restoreBackupKind === 'operation') return '/api/operation-backups/content';
+  if (state.restoreBackupKind === 'claude-deletion') return '/api/claude-code/session-deletion-backups/content';
+  return '/api/deletion-backups/content';
+}
+
+function backupMessageRoleLabel(message) {
+  if (message.role === 'user') return '你';
+  return state.restoreBackupKind === 'claude-deletion' ? 'Claude' : 'Codex';
+}
+
+function renderBackupContent(detail) {
+  state.backupContent = detail;
+  const comparison = detail.comparison || { state: 'unknown', label: '未知' };
+  $('backupContentState').className = `backup-content-state state-${comparison.state || 'unknown'}`;
+  $('backupContentState').textContent = comparison.state === 'missing'
+    ? '可恢复'
+    : (comparison.state === 'identical' ? '已存在' : (comparison.state === 'metadata_only' ? '仅元数据' : '有差异'));
+  $('backupContentMeta').classList.remove('hidden');
+  $('backupContentTitle').textContent = detail.session?.title || '(untitled)';
+  $('backupContentSessionId').textContent = detail.session?.id || '-';
+  $('backupContentProject').textContent = detail.session?.projectPath || '未知';
+  $('backupContentCreated').textContent = formatDate(detail.createdAt);
+  $('backupContentComparison').textContent = comparison.label || '未知';
+  const provider = detail.provider?.restoreTarget
+    ? `${detail.provider.backup || '未知'} → ${detail.provider.restoreTarget}`
+    : (detail.provider?.backup || (state.restoreBackupKind === 'claude-deletion' ? '保持 Claude 原生格式' : '未知'));
+  $('backupContentProvider').textContent = provider;
+
+  if (!detail.contentAvailable || !detail.content) {
+    $('backupContentSummary').textContent = detail.unavailableReason || '这个备份没有可读取的会话正文。';
+    $('backupContentCounts').textContent = '没有 rollout 正文';
+    $('backupContentMessages').innerHTML = `<div class="list-status">${escapeHtml(detail.unavailableReason || '没有可显示的消息。')}</div>`;
+    $('backupContentPagination').classList.add('hidden');
+    return;
+  }
+  const content = detail.content;
+  $('backupContentSummary').textContent = '以下内容直接解析自受管备份；这里只显示真实用户和助手消息，不会读取备份目录之外的文件。';
+  $('backupContentCounts').textContent = `${content.turnCount} 轮 · ${content.messageCount} 条消息 · ${content.recordCount} 条落盘记录`;
+  $('backupContentMessages').innerHTML = content.messages.length
+    ? content.messages.map((message) => `
+      <article class="backup-content-message role-${escapeHtml(message.role)}">
+        <header><strong>${escapeHtml(backupMessageRoleLabel(message))}</strong><span>第 ${(message.turnIndex ?? 0) + 1} 轮 · 第 ${message.lineNumber} 行</span></header>
+        <pre>${escapeHtml(message.text)}</pre>
+      </article>
+    `).join('')
+    : '<div class="list-status">备份中没有识别到可见的用户或助手消息。</div>';
+  const page = content.page;
+  $('backupContentPagination').classList.toggle('hidden', content.messageCount <= page.limit);
+  $('backupContentPreviousButton').disabled = page.previousOffset === null;
+  $('backupContentNextButton').disabled = page.nextOffset === null;
+  const first = content.messageCount ? page.offset + 1 : 0;
+  const last = Math.min(content.messageCount, page.offset + content.messages.length);
+  $('backupContentPageSummary').textContent = `${first}–${last} / ${content.messageCount} 条消息`;
+}
+
+async function loadBackupContent(sessionId, offset = 0) {
+  if (!state.restoreBackup || !sessionId) return;
+  state.backupContentSessionId = sessionId;
+  state.backupContentOffset = offset;
+  $('backupContentState').className = 'backup-content-state';
+  $('backupContentState').textContent = '读取中';
+  $('backupContentSummary').textContent = '正在校验备份清单并解析会话正文...';
+  $('backupContentMessages').innerHTML = '<div class="list-status">正在安全读取备份内容...</div>';
+  try {
+    const detail = await api(backupContentEndpoint(), {
+      method: 'POST',
+      body: JSON.stringify({ backupId: state.restoreBackup.id, sessionId, offset, limit: 80 }),
+    });
+    if (state.backupContentSessionId !== sessionId || state.backupContentOffset !== offset) return;
+    renderBackupContent(detail);
+  } catch (error) {
+    $('backupContentState').className = 'backup-content-state state-error';
+    $('backupContentState').textContent = '读取失败';
+    $('backupContentSummary').textContent = error.message;
+    $('backupContentMessages').innerHTML = '<div class="list-status">无法读取这个备份的会话正文。</div>';
+    throw error;
+  }
 }
 
 function renderBackupRestoreSessions() {
@@ -2241,34 +2449,59 @@ function renderBackupRestoreSessions() {
     $('backupRestoreList').innerHTML = sessions.map((session) => {
       const checked = state.selectedRestoreSessionIds.has(session.id) ? ' checked' : '';
       return `
-        <label class="restore-session-entry">
+        <div class="restore-session-entry">
           <input type="checkbox" data-restore-session="${escapeHtml(session.id)}"${checked}>
           <span class="backup-title">${escapeHtml(session.title || '(untitled)')}</span>
           <span class="session-id">${escapeHtml(session.id)}</span>
-        </label>
+          <button type="button" data-restore-content="${escapeHtml(session.id)}">查看内容</button>
+        </div>
       `;
     }).join('');
   }
   updateRestoreSelectionControls();
 }
 
-function openBackupRestore(backupId) {
+async function openBackupRestore(backupId, sessionId = null) {
   const backup = state.deletionBackups.find((item) => item.id === backupId);
   if (!backup) return;
+  const selectedSession = sessionId
+    ? backup.sessions.find((session) => session.id === sessionId)
+    : null;
+  if (sessionId && !selectedSession) {
+    throw new Error('所选会话不在这个备份包中，请刷新备份列表后重试。');
+  }
   if ($('backupManagerDialog').open) $('backupManagerDialog').close();
   state.restoreBackupKind = isClaudePlatform() ? 'claude-deletion' : 'deletion';
   state.restoreBackup = backup;
   state.selectedRestoreSessionIds = new Set();
   state.visibleRestoreSessionIds = [];
-  $('backupRestoreTitle').textContent = isClaudePlatform() ? '从 Claude 会话删除备份恢复' : '从会话删除备份恢复';
-  $('backupRestoreSource').textContent = `${formatDate(backup.createdAt)} · ${backup.sessions.length} 个会话 · ${backup.backupDir}`;
+  $('backupRestoreTitle').textContent = selectedSession
+    ? `恢复会话：${selectedSession.title || selectedSession.id}`
+    : (isClaudePlatform() ? '从 Claude 批量删除备份恢复' : '从批量删除备份恢复');
+  $('backupRestoreSource').textContent = selectedSession
+    ? `${formatDate(backup.createdAt)} · 来自包含 ${backup.sessions.length} 个会话的备份包 · ${backup.backupDir}`
+    : `${formatDate(backup.createdAt)} · 批量备份包内共 ${backup.sessions.length} 个会话 · ${backup.backupDir}`;
   $('backupRestoreFilter').value = '';
   resetBackupRestorePlan();
-  renderBackupRestoreSessions();
+  resetBackupContent();
+  const directSession = selectedSession || (backup.sessions.length === 1 ? backup.sessions[0] : null);
+  $('backupRestoreSelection').classList.toggle('hidden', Boolean(directSession));
+  if (directSession) {
+    state.selectedRestoreSessionIds = new Set([directSession.id]);
+  } else {
+    renderBackupRestoreSessions();
+  }
   $('backupRestoreDialog').showModal();
+  updateBackupAutoDetectTimer();
+  if (directSession) {
+    await Promise.all([
+      loadBackupContent(directSession.id),
+      previewBackupRestore(),
+    ]);
+  }
 }
 
-function openOperationBackupRestore(backupId) {
+async function openOperationBackupRestore(backupId) {
   const snapshot = state.operationBackups.find((item) => item.id === backupId);
   if (!snapshot) return;
   if ($('backupManagerDialog').open) $('backupManagerDialog').close();
@@ -2287,8 +2520,14 @@ function openOperationBackupRestore(backupId) {
   $('backupRestoreSource').textContent = `${snapshot.kindLabel} · ${formatDate(snapshot.createdAt)} · ${snapshot.path}`;
   $('backupRestoreFilter').value = '';
   resetBackupRestorePlan();
-  renderBackupRestoreSessions();
+  resetBackupContent();
+  $('backupRestoreSelection').classList.add('hidden');
   $('backupRestoreDialog').showModal();
+  updateBackupAutoDetectTimer();
+  await Promise.all([
+    loadBackupContent(snapshot.sessionId),
+    previewBackupRestore(),
+  ]);
 }
 
 function closeBackupRestore() {
@@ -2296,11 +2535,14 @@ function closeBackupRestore() {
   state.restoreBackupKind = 'deletion';
   state.selectedRestoreSessionIds = new Set();
   resetBackupRestorePlan();
+  resetBackupContent();
   $('backupRestoreDialog').close();
+  updateBackupAutoDetectTimer();
 }
 
 function renderBackupRestorePlan(plan) {
   state.backupRestorePlan = plan;
+  state.backupRestoreDetectionSignature = plan.planToken || null;
   if (state.restoreBackupKind === 'claude-deletion') {
     $('backupRestorePrimaryLabel').textContent = '恢复文件';
     $('backupRestoreReplacedLabel').textContent = '已经存在';
@@ -2322,6 +2564,7 @@ function renderBackupRestorePlan(plan) {
     $('backupRestoreConfirmation').value = '';
     $('applyBackupRestoreButton').disabled = true;
     $('backupRestorePlan').classList.remove('hidden');
+    $('applyBackupRestoreButton').textContent = plan.summary.sessions > 1 ? '安全恢复所选会话' : '安全恢复这个会话';
     return;
   }
   $('backupRestorePrimaryLabel').textContent = '恢复 rollout';
@@ -2337,8 +2580,11 @@ function renderBackupRestorePlan(plan) {
   $('backupRestoreConflicts').textContent = String(plan.summary.conflicts);
   $('backupRestoreProvider').textContent = plan.currentProvider;
   const messages = [];
-  if (plan.blockedByRunningCodex) {
-    messages.push('检测到 Codex 仍在运行。完全退出所有 Codex 后重新预览，才能恢复。');
+  if (plan.blockedByActiveTarget) {
+    const count = plan.targetSessionLock?.activeSessionIds?.length || 1;
+    messages.push(`${count} 个目标会话仍在 Codex 中打开。请只关闭这些目标会话后重新预览；其他 Codex 窗口可以保持打开。`);
+  } else if (plan.codexRunning) {
+    messages.push('其他 Codex 窗口仍在运行，不影响本次恢复。工具会锁定目标会话并清理其分页历史投影。');
   }
   if (plan.summary.conflicts) {
     messages.push(`${plan.summary.conflicts} 个当前 rollout 与备份内容不同，工具拒绝覆盖。`);
@@ -2354,25 +2600,22 @@ function renderBackupRestorePlan(plan) {
   $('backupRestoreConfirmation').value = '';
   $('applyBackupRestoreButton').disabled = true;
   $('backupRestorePlan').classList.remove('hidden');
+  $('applyBackupRestoreButton').textContent = plan.summary.sessions > 1 ? '安全恢复所选会话' : '安全恢复这个会话';
 }
 
 async function previewBackupRestore() {
   if (!state.restoreBackup || !state.selectedRestoreSessionIds.size) return;
   setAlert('');
-  const operationRestore = state.restoreBackupKind === 'operation';
-  const claudeRestore = state.restoreBackupKind === 'claude-deletion';
-  const plan = await api(claudeRestore
-    ? '/api/claude-code/session-deletion-backups/restore-preview'
-    : (operationRestore ? '/api/operation-backups/restore-preview' : '/api/deletion-backups/restore-preview'), {
+  const request = backupRestoreRequest();
+  const plan = await api(request.endpoint, {
     method: 'POST',
-    body: JSON.stringify(operationRestore
-      ? { backupId: state.restoreBackup.id }
-      : {
-        backupId: state.restoreBackup.id,
-        sessionIds: [...state.selectedRestoreSessionIds],
-      }),
+    body: JSON.stringify(request.body),
   });
   renderBackupRestorePlan(plan);
+  if (state.selectedRestoreSessionIds.size === 1) {
+    const [sessionId] = state.selectedRestoreSessionIds;
+    if (state.backupContentSessionId !== sessionId) await loadBackupContent(sessionId);
+  }
 }
 
 async function applyBackupRestore() {
@@ -2404,7 +2647,7 @@ async function applyBackupRestore() {
     return;
   }
   setAlert(
-    `已恢复 ${body.restored.sessions} 个会话；当前状态安全备份位于 ${body.safety.safetyDir}。请重新启动 Codex。`,
+    `已恢复 ${body.restored.sessions} 个会话；当前状态安全备份位于 ${body.safety.safetyDir}。打开目标会话时 Codex 会从 rollout 重建分页历史，其他窗口无需退出。`,
     'success',
   );
 }
@@ -2457,6 +2700,15 @@ $('selectVisibleSessions').addEventListener('change', (event) => {
   renderSessions();
 });
 $('backupManagerButton').addEventListener('click', () => openBackupManager().catch((error) => setAlert(error.message)));
+$('backupManagerDialog').addEventListener('close', updateBackupAutoDetectTimer);
+$('backupRestoreDialog').addEventListener('close', updateBackupAutoDetectTimer);
+$('backupAutoDetectEnabled').addEventListener('change', () => {
+  $('backupAutoDetectStatus').textContent = $('backupAutoDetectEnabled').checked
+    ? '打开期间每 15 秒检测一次，不会自动恢复或修改会话。'
+    : '自动检测已关闭；仍可使用“立即检测”。';
+  updateBackupAutoDetectTimer();
+});
+$('detectBackupChangesButton').addEventListener('click', () => detectBackupChanges({ manual: true }));
 $('operationHistoryButton').addEventListener('click', () => openOperationHistory().catch((error) => setAlert(error.message)));
 $('closeOperationHistoryButton').addEventListener('click', closeOperationHistory);
 $('operationUndoConfirmation').addEventListener('input', () => {
@@ -2494,12 +2746,17 @@ $('backupManagerList').addEventListener('change', (event) => {
   $('deleteSelectedBackupsButton').disabled = true;
 });
 $('backupManagerList').addEventListener('click', (event) => {
-  const button = event.target.closest('[data-backup-open], [data-operation-backup-open], [data-system-backup-restore]');
+  const button = event.target.closest('[data-backup-session-open], [data-backup-batch-open], [data-operation-backup-open], [data-system-backup-restore]');
   if (!button) return;
   if (button.dataset.systemBackupRestore) {
     previewVisibilitySystemBackup(button.dataset.systemBackupRestore).catch((error) => setAlert(error.message));
-  } else if (button.dataset.operationBackupOpen) openOperationBackupRestore(button.dataset.operationBackupOpen);
-  else openBackupRestore(button.dataset.backupOpen);
+  } else if (button.dataset.operationBackupOpen) {
+    openOperationBackupRestore(button.dataset.operationBackupOpen).catch((error) => setAlert(error.message));
+  } else if (button.dataset.backupSessionOpen) {
+    openBackupRestore(button.dataset.backupSessionOpen, button.dataset.backupSessionId).catch((error) => setAlert(error.message));
+  } else {
+    openBackupRestore(button.dataset.backupBatchOpen).catch((error) => setAlert(error.message));
+  }
 });
 $('backupDeleteConfirmation').addEventListener('input', () => {
   const selectedCount = state.backupManagerView === 'operation'
@@ -2534,6 +2791,11 @@ $('backupRestoreList').addEventListener('change', (event) => {
   resetBackupRestorePlan();
   updateRestoreSelectionControls();
 });
+$('backupRestoreList').addEventListener('click', (event) => {
+  const button = event.target.closest('[data-restore-content]');
+  if (!button) return;
+  loadBackupContent(button.dataset.restoreContent).catch((error) => setAlert(error.message));
+});
 $('selectVisibleRestoreSessions').addEventListener('change', (event) => {
   for (const id of state.visibleRestoreSessionIds) {
     if (event.target.checked) state.selectedRestoreSessionIds.add(id);
@@ -2543,6 +2805,14 @@ $('selectVisibleRestoreSessions').addEventListener('change', (event) => {
   renderBackupRestoreSessions();
 });
 $('previewBackupRestoreButton').addEventListener('click', () => previewBackupRestore().catch((error) => setAlert(error.message)));
+$('backupContentPreviousButton').addEventListener('click', () => {
+  const offset = state.backupContent?.content?.page?.previousOffset;
+  if (offset !== null && offset !== undefined) loadBackupContent(state.backupContentSessionId, offset).catch((error) => setAlert(error.message));
+});
+$('backupContentNextButton').addEventListener('click', () => {
+  const offset = state.backupContent?.content?.page?.nextOffset;
+  if (offset !== null && offset !== undefined) loadBackupContent(state.backupContentSessionId, offset).catch((error) => setAlert(error.message));
+});
 $('backupRestoreConfirmation').addEventListener('input', () => {
   $('applyBackupRestoreButton').disabled = !(
     state.backupRestorePlan?.canApply
@@ -2667,7 +2937,11 @@ $('discardEditsButton').addEventListener('click', () => {
 });
 $('previewEditsButton').addEventListener('click', () => previewEdits().catch((error) => setAlert(error.message)));
 $('editConfirmation').addEventListener('input', () => {
-  $('applyEditButton').disabled = !(state.editPreview && $('editConfirmation').value === 'EDIT');
+  $('applyEditButton').disabled = !(
+    state.editPreview
+    && !state.editPreview.blockedByActiveTarget
+    && $('editConfirmation').value === 'EDIT'
+  );
 });
 $('applyEditButton').addEventListener('click', () => applyEdits().catch((error) => setAlert(error.message)));
 $('restoreEditButton').addEventListener('click', () => restoreLastEdit().catch((error) => setAlert(error.message)));
@@ -2680,7 +2954,11 @@ document.querySelectorAll('input[name="cleanupMode"]').forEach((input) => {
   });
 });
 $('confirmation').addEventListener('input', () => {
-  $('applyButton').disabled = !(state.preview && $('confirmation').value === 'DELETE');
+  $('applyButton').disabled = !(
+    state.preview
+    && !state.cleanupTargetActive
+    && $('confirmation').value === 'DELETE'
+  );
 });
 $('applyButton').addEventListener('click', () => applyCleanup().catch((error) => setAlert(error.message)));
 

@@ -11,6 +11,7 @@ import {
   listClaudeSessionDeletionBackups,
   previewClaudeSessionDeletion,
   previewClaudeSessionDeletionBackupRestore,
+  readClaudeSessionDeletionBackupContent,
 } from '../src/claude-session-delete.mjs';
 
 const FIRST_ID = '11111111-1111-4111-8111-111111111111';
@@ -82,6 +83,14 @@ test('Claude deletion backs up the complete session package and safely restores 
     const listed = await listClaudeSessionDeletionBackups(fixture.claudeHome, { backupRoot: fixture.backupRoot });
     assert.equal(listed.backups.length, 1);
     assert.equal(listed.backups[0].sessions[0].id, FIRST_ID);
+    const backupContent = await readClaudeSessionDeletionBackupContent(fixture.claudeHome, {
+      backupRoot: fixture.backupRoot,
+      backupId: listed.backups[0].id,
+      sessionId: FIRST_ID,
+    });
+    assert.equal(backupContent.comparison.state, 'missing');
+    assert.equal(backupContent.content.messageCount, 2);
+    assert.equal(backupContent.content.messages[0].text, '第一会话');
     const restorePreview = await previewClaudeSessionDeletionBackupRestore(fixture.claudeHome, {
       backupRoot: fixture.backupRoot,
       backupId: listed.backups[0].id,

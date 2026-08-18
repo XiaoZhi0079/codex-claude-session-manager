@@ -33,6 +33,7 @@ Claude 会话删除与备份：
 | POST | `/api/claude-code/session-deletions/apply` | 备份并删除；确认词 `PURGE` |
 | GET | `/api/claude-code/session-deletion-backups` | 列出工具创建的 Claude 删除备份 |
 | POST | `/api/claude-code/session-deletion-backups/restore-preview` | 预览按会话恢复 |
+| POST | `/api/claude-code/session-deletion-backups/content` | 安全读取备份内指定会话的精简对话和当前状态差异 |
 | POST | `/api/claude-code/session-deletion-backups/restore-apply` | 恢复；确认词 `RESTORE` |
 | POST | `/api/claude-code/session-deletion-backups/delete` | 永久删除备份；确认词 `ERASE` |
 
@@ -59,6 +60,8 @@ Claude Code 轮次删除：
 
 清理 `mode` 为 `truncate`（从所选轮开始）或 `single`（只删除所选轮）。写入接口必须携带预览返回的 `sourceHash`。
 
+Codex 编辑与清理预览会返回 `targetSessionLock`。若 `activeSessionIds` 非空，必须只关闭这些目标会话后重新预览；其他 Codex 窗口可以继续运行。成功写入会返回 `threadHistory`，其中包含写前状态、数据库备份和仅针对目标会话的投影失效统计。
+
 ## 可见性
 
 | 方法 | 路径 | 确认词 |
@@ -66,7 +69,7 @@ Claude Code 轮次删除：
 | GET | `/api/visibility/preview` | 无 |
 | POST | `/api/visibility/apply` | `SYNC` |
 
-写入请求必须携带预览返回的 `planToken`。
+写入请求必须携带预览返回的 `planToken`。修复只统一 rollout 和 SQLite 的供应商元数据；实际发生修改时会生成带逐项原值的系统安全备份。
 
 ## 整会话删除
 
@@ -77,6 +80,8 @@ Claude Code 轮次删除：
 | POST | `/api/session-delete/batch-preview` | 无 |
 | POST | `/api/session-delete/batch-apply` | `PURGE` |
 
+删除预览和两类恢复预览返回 `targetSessionLock`、`blockedByActiveTarget` 与 `canApply`。应用接口在写入期间再次持有目标会话锁，不能用旧预览绕过。删除、删除备份恢复和轮次快照恢复的成功结果包含 `threadHistory`；其他 Codex 窗口无需关闭。
+
 ## 备份管理
 
 会话删除备份：
@@ -84,6 +89,7 @@ Claude Code 轮次删除：
 - `GET /api/deletion-backups`
 - `POST /api/deletion-backups/delete`，确认词 `ERASE`
 - `POST /api/deletion-backups/restore-preview`
+- `POST /api/deletion-backups/content`，按 `backupId + sessionId` 只读查看受管备份正文
 - `POST /api/deletion-backups/restore-apply`，确认词 `RESTORE`
 
 轮次操作快照：
@@ -91,6 +97,7 @@ Claude Code 轮次删除：
 - `GET /api/operation-backups`
 - `POST /api/operation-backups/delete`，确认词 `ERASE`
 - `POST /api/operation-backups/restore-preview`
+- `POST /api/operation-backups/content`，只读查看快照正文和当前状态差异
 - `POST /api/operation-backups/restore-apply`，确认词 `RESTORE`
 
 系统安全备份：
@@ -99,6 +106,8 @@ Claude Code 轮次删除：
 - `POST /api/system-backups/delete`，确认词 `ERASE`
 - `POST /api/system-backups/visibility-restore-preview`
 - `POST /api/system-backups/visibility-restore-apply`，确认词 `ROLLBACK`
+
+可见性回退是字段级合并，不是数据库或 rollout 整体回档。预览只为原修复清单中的会话生成 `rolloutUpdates` / `sqliteUpdates`，忽略备份后新增的会话，并返回 `conflicts`。当前目标缺失或供应商值已不再等于该次修复的目标值时，`canApply` 为 `false`，整批不写入。应用会保留 rollout 中后来追加的记录和 SQLite 其他列，并先为当前状态建立安全点。
 
 ## 操作历史与撤销
 

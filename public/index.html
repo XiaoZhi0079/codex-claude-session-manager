@@ -58,7 +58,7 @@
           <div class="metric-docs">
             <dl class="metric-doc"><dt>仅备份</dt><dd>当前 sessions 或 archived_sessions 中没有正文，只在 CCSwitch 或本工具的备份中找到。它不计入“Codex 隐藏”。</dd></dl>
             <dl class="metric-doc"><dt>仅 SQLite</dt><dd>数据库里还有标题或索引记录，但 rollout 正文已经不存在。没有匹配备份时无法继续阅读原对话。</dd></dl>
-            <dl class="metric-doc"><dt>可恢复</dt><dd>正文当前缺失，但工具找到了会话 ID 一致的安全备份，可以通过备份恢复或可见性修复重新放回 Codex。</dd></dl>
+            <dl class="metric-doc"><dt>可恢复</dt><dd>正文当前缺失，但工具找到了会话 ID 一致的会话备份，可以通过备份管理恢复。</dd></dl>
           </div>
         </div>
       </dialog>
@@ -74,7 +74,7 @@
           </div>
           <div class="operation-runtime-rules">
             <strong>Codex 运行时规则</strong>
-            <span>轮次编辑和清理可以执行，完成后刷新或重新打开会话；整会话恢复、可见性恢复涉及 SQLite，一旦检测到 Codex 正在运行会停止执行；永久删除备份不可撤销。</span>
+            <span>编辑、清理、删除和普通会话恢复只需关闭目标会话；全量可见性修复及其回退会跨会话修改 SQLite，必须完全退出 Codex。永久删除备份不可撤销。</span>
           </div>
           <div id="operationHistoryList" class="operation-history-list"></div>
           <section id="operationUndoPanel" class="operation-undo-panel hidden">
@@ -129,7 +129,7 @@
         <div class="visibility-head">
           <div>
             <h2>Codex 全量会话可见性修复</h2>
-            <p>将可恢复会话统一到当前 model_provider；请先关闭 Codex，完成后重新启动。</p>
+            <p>把可恢复会话的供应商元数据统一到当前 <code>model_provider</code>；这是兼容性工具，不是日常维护功能。</p>
           </div>
           <button id="closeVisibilityButton" type="button">关闭</button>
         </div>
@@ -137,15 +137,17 @@
           <dt>目标供应商</dt><dd id="visibilityProvider">-</dd>
           <dt>修改 rollout</dt><dd id="visibilityRollouts">-</dd>
           <dt>修改 SQLite</dt><dd id="visibilitySqlite">-</dd>
-          <dt>从备份恢复</dt><dd id="visibilityRestores">-</dd>
+          <dt>从备份补回</dt><dd id="visibilityRestores">-</dd>
           <dt>运行中的 Codex</dt><dd id="visibilityCodexProcesses">-</dd>
           <dt>跳过活跃会话</dt><dd id="visibilityActive">-</dd>
-          <dt>无法自动恢复</dt><dd id="visibilityUnresolved">-</dd>
+          <dt>无法自动处理</dt><dd id="visibilityUnresolved">-</dd>
         </dl>
         <div id="visibilityProcessWarning" class="mode-warning warning hidden"></div>
         <div class="mode-warning warning">
-          跨供应商继续旧会话时，原供应商生成的 encrypted_content 可能无法由新供应商解密。
-          修复只保证 Codex 能识别和显示会话，不保证跨供应商续聊一定成功。
+          <strong>能力边界：</strong>修复只调整 rollout 与 SQLite 中的供应商元数据，使会话有机会重新出现在列表中；不会转换或解密历史中的 <code>encrypted_content</code>，因此不保证跨供应商续聊成功。执行前会创建可回退的系统安全备份。
+        </div>
+        <div class="mode-warning">
+          <strong>以后回退时：</strong>只把本次确实修改过的供应商字段改回，不用旧数据库或旧 rollout 覆盖当前数据。修复后新增的会话、后来追加的消息和其他字段都会保留；若目标会话已删除、供应商又被改过或路径不再安全，工具会报告冲突并拒绝整批回退。由本次修复补回的缺失 rollout 不会被删除，以免丢失后来消息。
         </div>
         <label class="confirm visibility-confirm">
           <span>输入 SYNC 确认</span>
@@ -160,7 +162,7 @@
           <div class="visibility-head">
             <div>
               <h2>删除整个会话</h2>
-              <p id="sessionDeleteIntro">从 Codex 中移除正文与索引；操作前会创建可恢复备份。Codex 运行中也可删除，完成后请刷新 Codex。</p>
+              <p id="sessionDeleteIntro">从 Codex 中移除正文、索引和分页历史；只需关闭目标会话，其他 Codex 窗口可以继续使用。</p>
             </div>
             <button id="closeSessionDeleteButton" type="button">关闭</button>
           </div>
@@ -197,9 +199,15 @@
             <button id="operationBackupsTab" type="button" role="tab" aria-selected="false">轮次操作快照</button>
             <button id="systemBackupsTab" type="button" role="tab" aria-selected="false">系统安全备份</button>
           </div>
+          <div class="backup-auto-detect" aria-live="polite">
+            <label><input id="backupAutoDetectEnabled" type="checkbox" checked><span>自动检测备份和恢复目标变化（只读）</span></label>
+            <span id="backupAutoDetectStatus">打开期间每 15 秒检测一次，不会自动恢复或修改会话。</span>
+            <button id="detectBackupChangesButton" type="button" class="btn btn-sm">立即检测</button>
+          </div>
+          <div class="backup-delete-selection-hint">复选框用途：选择要永久删除的备份。查看备份及恢复无需勾选。</div>
           <div id="backupManagerList" class="backup-manager-list"></div>
           <div id="backupManagerWarning" class="mode-warning warning">
-            永久删除后无法通过本工具恢复。这里只会删除由“删除整个会话”功能生成的备份。
+            左侧复选框仅用于选择要永久删除的备份；查看或恢复不需要先勾选。永久删除后无法通过本工具恢复。
           </div>
           <label class="confirm visibility-confirm">
             <span>输入 ERASE 确认永久删除</span>
@@ -212,20 +220,29 @@
       <dialog id="visibilityBackupRestoreDialog" class="session-delete-dialog">
         <div class="session-delete-card">
           <div class="visibility-head">
-            <div><h2>恢复统一前的供应商状态</h2><p>只恢复可证明由该次统一修改的供应商字段，不覆盖后来新增的消息或会话。</p></div>
+            <div>
+              <h2>回退可见性修复的供应商字段</h2>
+              <p>这是字段级回退，不会把整个 Codex 或会话正文恢复到备份日期。</p>
+            </div>
             <button id="closeVisibilityBackupRestoreButton" type="button">关闭</button>
           </div>
           <dl class="visibility-grid">
-            <dt>备份时间</dt><dd id="visibilityRestoreCreated">-</dd>
+            <dt>修复备份时间</dt><dd id="visibilityRestoreCreated">-</dd>
             <dt>当时统一到</dt><dd id="visibilityRestoreTarget">-</dd>
-            <dt>恢复 rollout</dt><dd id="visibilityRestoreRollouts">-</dd>
-            <dt>恢复 SQLite</dt><dd id="visibilityRestoreSqlite">-</dd>
+            <dt>回退 rollout 字段</dt><dd id="visibilityRestoreRollouts">-</dd>
+            <dt>回退 SQLite 字段</dt><dd id="visibilityRestoreSqlite">-</dd>
             <dt>冲突</dt><dd id="visibilityRestoreConflicts">-</dd>
             <dt>旧版清单</dt><dd id="visibilityRestoreLegacy">-</dd>
           </dl>
+          <div class="mode-warning">
+            <strong>会保留：</strong>备份之后新增的会话、现有 rollout 中后来追加的消息、标题及其他 SQLite 字段。由修复补回的缺失 rollout 也不会删除，只回退其中的供应商元数据。
+          </div>
+          <div class="mode-warning warning">
+            <strong>不能保证：</strong>旧供应商一定能继续解密或续聊修复后产生的内容。若任何目标记录缺失或供应商字段已被再次修改，本次回退会整体停止，不会强制覆盖。应用前还会为当前状态再创建一个安全点。
+          </div>
           <div id="visibilityRestoreWarning" class="mode-warning warning hidden"></div>
           <label class="confirm visibility-confirm"><span>输入 ROLLBACK 确认</span><input id="visibilityRestoreConfirmation" autocomplete="off" spellcheck="false"></label>
-          <button id="applyVisibilityBackupRestoreButton" type="button" class="primary wide-button" disabled>创建安全点并恢复供应商状态</button>
+          <button id="applyVisibilityBackupRestoreButton" type="button" class="primary wide-button" disabled>创建当前安全点并回退供应商字段</button>
         </div>
       </dialog>
 
@@ -238,18 +255,41 @@
             </div>
             <button id="closeBackupRestoreButton" type="button">关闭</button>
           </div>
-          <input id="backupRestoreFilter" type="search" placeholder="筛选备份中的标题或会话 ID">
-          <div class="batch-toolbar restore-toolbar">
-            <label class="batch-select-all">
-              <input id="selectVisibleRestoreSessions" type="checkbox">
-              <span>全选当前结果</span>
-            </label>
-            <span id="selectedRestoreSessionCount" class="muted">已选 0</span>
-            <button id="previewBackupRestoreButton" type="button" disabled>预览恢复</button>
-          </div>
-          <div id="backupRestoreList" class="backup-manager-list"></div>
+          <section id="backupRestoreSelection" class="backup-restore-selection hidden">
+            <input id="backupRestoreFilter" type="search" placeholder="筛选备份中的标题或会话 ID">
+            <div class="batch-toolbar restore-toolbar">
+              <label class="batch-select-all">
+                <input id="selectVisibleRestoreSessions" type="checkbox">
+                <span>全选当前结果</span>
+              </label>
+              <span id="selectedRestoreSessionCount" class="muted">已选 0</span>
+              <button id="previewBackupRestoreButton" type="button" disabled>生成所选会话恢复计划</button>
+            </div>
+            <div id="backupRestoreList" class="backup-manager-list"></div>
+          </section>
+          <section id="backupContentPanel" class="backup-content-panel" aria-live="polite">
+            <div class="backup-section-head">
+              <div><h3>备份中的会话内容</h3><p id="backupContentSummary">正在安全读取备份正文...</p></div>
+              <span id="backupContentState" class="backup-content-state">读取中</span>
+            </div>
+            <dl id="backupContentMeta" class="visibility-grid hidden">
+              <dt>标题</dt><dd id="backupContentTitle">-</dd>
+              <dt>会话 ID</dt><dd id="backupContentSessionId">-</dd>
+              <dt>项目目录</dt><dd id="backupContentProject">-</dd>
+              <dt>备份时间</dt><dd id="backupContentCreated">-</dd>
+              <dt>内容规模</dt><dd id="backupContentCounts">-</dd>
+              <dt>与当前状态</dt><dd id="backupContentComparison">-</dd>
+              <dt>供应商</dt><dd id="backupContentProvider">-</dd>
+            </dl>
+            <div id="backupContentMessages" class="backup-content-messages"><div class="list-status">正在读取...</div></div>
+            <div id="backupContentPagination" class="backup-content-pagination hidden">
+              <button id="backupContentPreviousButton" type="button" class="btn btn-sm">上一页</button>
+              <span id="backupContentPageSummary" class="muted">-</span>
+              <button id="backupContentNextButton" type="button" class="btn btn-sm">下一页</button>
+            </div>
+          </section>
           <section id="backupRestorePlan" class="edit-preview hidden">
-            <h3>恢复预览</h3>
+            <h3>恢复影响</h3>
             <dl class="visibility-grid">
               <dt>会话</dt><dd id="backupRestoreSessions">-</dd>
               <dt id="backupRestorePrimaryLabel">恢复 rollout</dt><dd id="backupRestoreRollouts">-</dd>
@@ -409,6 +449,7 @@
               </div>
               <section id="editPreview" class="edit-preview hidden">
                 <h3>修改预览</h3><div id="editChanges" class="edit-changes"></div>
+                <div id="editSessionWarning" class="mode-warning hidden" role="status"></div>
                 <label class="confirm"><span>输入 EDIT 确认</span><input id="editConfirmation" autocomplete="off" spellcheck="false"></label>
                 <button id="applyEditButton" type="button" class="primary wide-button" disabled>应用修改</button>
               </section>

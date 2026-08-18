@@ -341,6 +341,17 @@ dialog::backdrop { background: color-mix(in oklab, var(--bg) 55%, transparent); 
 .backup-entry, .restore-session-entry { border-color: var(--border); }
 .backup-title { color: var(--fg); }
 .backup-meta, .backup-path, .restore-session-entry .session-id { color: var(--muted); }
+.backup-auto-detect, .backup-content-panel, .backup-content-messages { border-color: var(--border); background: var(--surface); }
+.backup-auto-detect > span, .backup-section-head p, .backup-content-message header { color: var(--muted); }
+.backup-delete-selection-hint { color: var(--muted); }
+.backup-content-state { background: var(--surface-2); color: var(--muted); }
+.backup-content-message { border-color: var(--border); }
+.backup-content-message.role-assistant { background: var(--surface-2); }
+.backup-content-message strong, .backup-content-message pre { color: var(--fg); }
+.backup-session-title-button { color: var(--fg); }
+.backup-session-title-button:hover { color: var(--accent-ink); }
+.backup-package-sessions, .backup-package-session { border-color: var(--border); }
+.backup-package-session .session-id { color: var(--muted); }
 
 .operation-history-dialog { width: min(860px, calc(100vw - 48px)); max-width: none; padding: 0; }
 .operation-runtime-rules { display: grid; grid-template-columns: 132px minmax(0, 1fr); gap: 14px; align-items: center; padding: 11px 13px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-2); }

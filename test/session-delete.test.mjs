@@ -14,6 +14,7 @@ import {
   previewSessionDeletionBatch,
   previewSessionDeletionBackupRestore,
   previewSessionDeletion,
+  readSessionDeletionBackupContent,
 } from '../src/session-delete.mjs';
 
 const SESSION_ID = '019faa00-aaaa-7222-8333-444455556666';
@@ -75,12 +76,30 @@ async function fixture({ withRollout = true } = {}) {
     subagent: { thread_spawn: { parent_thread_id: SESSION_ID } },
   }));
   db.close();
+  const historyDbPath = path.join(codexHome, 'thread_history_1.sqlite');
+  const historyDb = new DatabaseSync(historyDbPath);
+  historyDb.exec(`
+    CREATE TABLE thread_history_projection_state (
+      thread_id TEXT PRIMARY KEY,
+      next_rollout_byte_offset INTEGER NOT NULL,
+      next_rollout_ordinal INTEGER NOT NULL
+    );
+    CREATE TABLE thread_turns (thread_id TEXT NOT NULL, turn_id TEXT NOT NULL);
+    CREATE TABLE thread_items (thread_id TEXT NOT NULL, item_id TEXT NOT NULL);
+  `);
+  for (const id of [SESSION_ID, CHILD_ID]) {
+    historyDb.prepare('INSERT INTO thread_history_projection_state VALUES (?, 100, 2)').run(id);
+    historyDb.prepare('INSERT INTO thread_turns VALUES (?, ?)').run(id, `${id}-turn`);
+    historyDb.prepare('INSERT INTO thread_items VALUES (?, ?)').run(id, `${id}-item`);
+  }
+  historyDb.close();
   return {
     root,
     codexHome,
     backupRoot,
     rolloutPath,
     dbPath,
+    historyDbPath,
     env: { ...process.env, USERPROFILE: root, HOME: root },
   };
 }
@@ -123,6 +142,7 @@ test('whole-session deletion backs up and removes rollout, SQLite row, and legac
   assert.equal(result.childThreadsKept, 1);
   assert.equal(await missing(result.backup.rolloutBackup), false);
   assert.equal(await missing(result.backup.stateDbBackup), false);
+  assert.equal(await missing(result.backup.threadHistory.backup.backupPath), false);
   const index = await readFile(path.join(data.codexHome, 'session_index.jsonl'), 'utf8');
   assert.equal(index.includes(SESSION_ID), false);
   assert.equal(index.includes(CHILD_ID), true);
@@ -131,6 +151,10 @@ test('whole-session deletion backs up and removes rollout, SQLite row, and legac
   assert.equal(db.prepare('SELECT count(*) AS count FROM threads WHERE id = ?').get(SESSION_ID).count, 0);
   assert.equal(db.prepare('SELECT count(*) AS count FROM threads WHERE id = ?').get(CHILD_ID).count, 1);
   db.close();
+  const historyDb = new DatabaseSync(data.historyDbPath, { readOnly: true });
+  assert.equal(historyDb.prepare('SELECT COUNT(*) AS count FROM thread_items WHERE thread_id = ?').get(SESSION_ID).count, 0);
+  assert.equal(historyDb.prepare('SELECT COUNT(*) AS count FROM thread_items WHERE thread_id = ?').get(CHILD_ID).count, 1);
+  historyDb.close();
 });
 
 test('whole-session deletion can remove SQLite-only residue without fabricating a rollout backup', async () => {
@@ -361,7 +385,20 @@ test('deletion backup restores one session rollout, SQLite row, and legacy title
     now: new Date('2026-07-30T15:05:00Z'),
     codexProcessCheck: NO_CODEX_PROCESSES,
   };
+  const staleHistory = new DatabaseSync(data.historyDbPath);
+  staleHistory.prepare('INSERT INTO thread_history_projection_state VALUES (?, 999, 99)').run(SESSION_ID);
+  staleHistory.prepare('INSERT INTO thread_turns VALUES (?, ?)').run(SESSION_ID, 'stale-turn');
+  staleHistory.prepare('INSERT INTO thread_items VALUES (?, ?)').run(SESSION_ID, 'stale-item');
+  staleHistory.close();
   const restorePreview = await previewSessionDeletionBackupRestore(data.codexHome, restoreOptions);
+  const backupContent = await readSessionDeletionBackupContent(data.codexHome, {
+    backupRoot: data.backupRoot,
+    backupId,
+    sessionId: SESSION_ID,
+  });
+  assert.equal(backupContent.contentAvailable, true);
+  assert.equal(backupContent.comparison.state, 'missing');
+  assert.equal(backupContent.content.recordCount, 2);
   assert.deepEqual(restorePreview.summary, {
     sessions: 1,
     rolloutFiles: 1,
@@ -379,6 +416,7 @@ test('deletion backup restores one session rollout, SQLite row, and legacy title
   assert.equal(restored.restartRequired, true);
   assert.equal(await missing(data.rolloutPath), false);
   assert.equal(await missing(restored.safety.stateDbBackup), false);
+  assert.equal(await missing(restored.threadHistory.backup.backupPath), false);
   const first = JSON.parse((await readFile(data.rolloutPath, 'utf8')).split(/\r?\n/, 1)[0]);
   assert.equal(first.payload.model_provider, 'custom');
   const index = await readFile(path.join(data.codexHome, 'session_index.jsonl'), 'utf8');
@@ -389,6 +427,46 @@ test('deletion backup restores one session rollout, SQLite row, and legacy title
   assert.equal(row.model_provider, 'custom');
   assert.equal(row.rollout_path, data.rolloutPath);
   db.close();
+  const historyDb = new DatabaseSync(data.historyDbPath, { readOnly: true });
+  assert.equal(historyDb.prepare('SELECT COUNT(*) AS count FROM thread_items WHERE thread_id = ?').get(SESSION_ID).count, 0);
+  assert.equal(historyDb.prepare('SELECT COUNT(*) AS count FROM thread_items WHERE thread_id = ?').get(CHILD_ID).count, 1);
+  historyDb.close();
+});
+
+test('deletion backup restore proceeds while Codex is running and recommends a refresh', async () => {
+  const data = await fixture({ withRollout: true });
+  const runningCodex = { available: true, processes: [{ pid: 4242, name: 'codex' }] };
+  const deleteOptions = {
+    backupRoot: data.backupRoot,
+    env: data.env,
+    sessionId: SESSION_ID,
+    now: new Date('2026-07-30T15:30:00Z'),
+    codexProcessCheck: runningCodex,
+  };
+  const deletionPreview = await previewSessionDeletion(data.codexHome, deleteOptions);
+  const deletion = await applySessionDeletion(data.codexHome, {
+    ...deleteOptions,
+    planToken: deletionPreview.planToken,
+  });
+  const restoreOptions = {
+    backupRoot: data.backupRoot,
+    env: data.env,
+    backupId: path.basename(deletion.backup.backupDir),
+    sessionIds: [SESSION_ID],
+    now: new Date('2026-07-30T15:35:00Z'),
+    codexProcessCheck: runningCodex,
+  };
+  const restorePreview = await previewSessionDeletionBackupRestore(data.codexHome, restoreOptions);
+  assert.equal(restorePreview.codexRunning, true);
+  assert.equal(restorePreview.blockedByRunningCodex, false);
+  assert.equal(restorePreview.canApply, true);
+
+  const restored = await applySessionDeletionBackupRestore(data.codexHome, {
+    ...restoreOptions,
+    planToken: restorePreview.planToken,
+  });
+  assert.equal(restored.codexRefreshRecommended, true);
+  assert.equal(await missing(data.rolloutPath), false);
 });
 
 test('batch deletion backup can restore only one selected session', async () => {

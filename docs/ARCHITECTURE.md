@@ -12,8 +12,9 @@ Local Session Manager 是本地单进程工具：Node.js HTTP 服务负责扫描
 |---|---|
 | `bin/codex-turn-cleaner.mjs` | 命令行参数、启动和退出处理 |
 | `src/server.mjs` | 静态页面、REST 路由、写操作审计和一键撤销编排 |
-| `src/registry.mjs` | 合并扫描会话来源、判定 Codex 可见性、供应商统一 |
+| `src/registry.mjs` | 合并扫描会话来源、判定 Codex 可见性、供应商统一及逐项备份清单 |
 | `src/core.mjs` | JSONL 解析、轮次边界、消息编辑、轮次清理和 rollout 恢复 |
+| `src/codex-thread-history.mjs` | 目标会话 writer lock 探测/持有、分页历史数据库解析、备份与目标投影失效 |
 | `src/context-view.mjs` | 完整上下文分类、过滤、分页、定位和导出 |
 | `src/claude-sessions.mjs` | Claude Code 主会话扫描、标题解析、轮次、侧边数据、子代理、诊断与落盘上下文 |
 | `src/claude-session-delete.mjs` | Claude 完整会话包删除预览、指纹校验、备份、恢复与永久删除 |
@@ -33,8 +34,9 @@ Local Session Manager 是本地单进程工具：Node.js HTTP 服务负责扫描
 1. `sessions/**/rollout-*.jsonl` 与 `archived_sessions/**/rollout-*.jsonl` 提供正文、项目目录、时间和供应商元数据。
 2. 最新可用的 `state_N.sqlite` 中 `threads` 表提供 Codex 当前线程索引、正式标题、rollout 路径和 `model_provider`。
 3. `session_index.jsonl` 提供旧版 Codex 标题与索引兼容信息。
-4. CCSwitch 迁移备份和本工具普通备份用于诊断正文是否仍可恢复。
-5. 整会话删除备份单独管理，不作为普通“仅备份会话”重新混入列表。
+4. 最新 `thread_history_N.sqlite` 保存从 rollout 物化的分页历史；它不是正文真值。
+5. CCSwitch 迁移备份和本工具普通备份用于诊断正文是否仍可恢复。
+6. 整会话删除备份单独管理，不作为普通“仅备份会话”重新混入列表。
 
 输出会话对象保留各来源事实，再计算 `storageStatus`、`codexVisible`、`hiddenFromCodex` 等展示状态。友好标题优先使用 Codex/SQLite 或旧索引标题，只有正式标题缺失时才从首条用户消息推导。
 
@@ -56,9 +58,11 @@ Claude 删除把主 JSONL、`projects/<项目>/<sessionId>`、`tasks/<sessionId>
 
 ### 写操作
 
-浏览器预览 → 服务端读取当前事实并生成哈希化计划 → 用户输入确认词 → 服务端重新校验计划/文件 → 创建备份或安全点 → 原子文件写入或 SQLite 事务 → 写后验证 → 记录完成事件 → 页面提示刷新方式。
+浏览器预览 → 服务端读取当前事实、探测目标 writer lock 并生成哈希化计划 → 用户输入确认词 → 服务端持有目标 writer lock 并重新校验计划/文件 → 创建 rollout/state/thread-history 备份或安全点 → 原子文件写入或 SQLite 事务 → 写后验证 → 仅清除目标分页投影 → 记录完成事件 → 页面提示重新打开目标会话。
 
 任一步骤失败时，模块使用原始正文、备份或事务执行回滚，并把回滚错误记录到操作历史。
+
+可见性修复是跨会话例外，要求 Codex 完全退出。其系统备份包含 SQLite 一致性快照，但后续回退不会直接替换当前数据库或整份 rollout；`src/operation-backup.mjs` 根据原修复清单和当前供应商值生成字段级差异，只重写 `model_provider`。因此后来新增的会话、消息及其他元数据不受影响；任一清单目标出现缺失或第三方变化时整批拒绝应用。
 
 ### 一键撤销
 

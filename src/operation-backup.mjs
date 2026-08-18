@@ -14,6 +14,7 @@ import {
 } from 'node:fs/promises';
 
 import {
+  buildCompactConversationPreview,
   CleanerError,
   parseJsonl,
   readRolloutMetadata,
@@ -24,6 +25,12 @@ import {
   buildSessionRegistry,
   detectRunningCodexProcesses,
 } from './registry.mjs';
+import {
+  inspectTargetSessionLocks,
+  invalidateThreadHistory,
+  prepareThreadHistoryMutation,
+  withTargetSessionLocks,
+} from './codex-thread-history.mjs';
 
 const SNAPSHOT_KINDS = [
   {
@@ -210,6 +217,43 @@ async function requireSnapshot(codexHome, backupId, options) {
   return { ...snapshot, backupRoot: listed.root };
 }
 
+export async function readOperationBackupContent(codexHome, options = {}) {
+  const snapshot = await requireSnapshot(codexHome, options.backupId, options);
+  const source = await readFile(snapshot.path, 'utf8');
+  const records = parseJsonl(source, snapshot.path);
+  const preview = await previewOperationBackupRestore(codexHome, options);
+  let currentSummary = null;
+  if (preview.currentFingerprint) {
+    try {
+      const currentRecords = parseJsonl(await readFile(preview.rolloutTarget, 'utf8'), preview.rolloutTarget);
+      const current = buildCompactConversationPreview(currentRecords, { offset: 0, limit: 1 });
+      currentSummary = {
+        recordCount: current.recordCount,
+        turnCount: current.turnCount,
+        messageCount: current.messageCount,
+      };
+    } catch (error) {
+      currentSummary = { parseError: error.message };
+    }
+  }
+  const comparison = preview.actions.rollout === 'already_present'
+    ? { state: 'identical', label: '当前正文与快照一致', currentExists: true }
+    : (preview.actions.rollout === 'replace'
+      ? { state: 'replace', label: '当前正文与快照不同；恢复会先保存当前版本，再用快照替换', currentExists: true }
+      : { state: 'missing', label: '当前正文缺失，可从此快照恢复', currentExists: false });
+  return {
+    backupId: snapshot.id,
+    createdAt: snapshot.createdAt,
+    snapshotKind: snapshot.kind,
+    snapshotKindLabel: snapshot.kindLabel,
+    session: { id: snapshot.sessionId, title: snapshot.title, projectPath: snapshot.projectPath },
+    provider: { backup: snapshot.modelProvider || null, restoreTarget: preview.currentProvider || null },
+    contentAvailable: true,
+    comparison: { ...comparison, current: currentSummary },
+    content: buildCompactConversationPreview(records, options),
+  };
+}
+
 function derivedRolloutTarget(codexHome, snapshot) {
   const match = snapshot.fileName.match(/^rollout-(\d{4})-(\d{2})-(\d{2})T.*\.jsonl$/i);
   if (!match) {
@@ -340,7 +384,6 @@ function restorePlanToken(plan) {
     indexSourceHash: plan.indexSourceHash,
     currentProvider: plan.currentProvider,
     actions: plan.actions,
-    processIds: plan.codexProcessCheck.processes.map((item) => item.pid).sort((a, b) => a - b),
   })).digest('hex');
 }
 
@@ -386,6 +429,10 @@ export async function previewOperationBackupRestore(codexHome, options = {}) {
   const indexAction = indexState.count > 0 ? 'already_present' : 'insert';
   const actions = { rollout: rolloutAction, sqlite: sqliteAction, index: indexAction };
   const actionCount = Object.values(actions).filter((action) => !['already_present', 'none'].includes(action)).length;
+  const targetSessionLock = options.sessionLocksHeld
+    ? { available: true, sessions: [], activeSessionIds: [], heldByCleaner: true }
+    : await inspectTargetSessionLocks(codexHome, [snapshot.sessionId], options);
+  const blockedByActiveTarget = targetSessionLock.activeSessionIds.length > 0;
   const plan = {
     backupId: snapshot.id,
     backupPath: snapshot.path,
@@ -405,7 +452,11 @@ export async function previewOperationBackupRestore(codexHome, options = {}) {
     indexPath: indexState.indexPath,
     indexSourceHash: indexState.sourceHash,
     codexProcessCheck,
-    blockedByRunningCodex: codexProcessCheck.processes.length > 0,
+    codexRunning: codexProcessCheck.processes.length > 0,
+    blockedByRunningCodex: false,
+    targetSessionLock,
+    blockedByActiveTarget,
+    refreshCodexAfterApply: codexProcessCheck.processes.length > 0,
     actions,
     threadRow: synthesizedThreadRow({
       snapshot,
@@ -432,7 +483,7 @@ export async function previewOperationBackupRestore(codexHome, options = {}) {
       actionCount > 0
       && registry.sqliteAvailable
       && registry.stateDbPath
-      && codexProcessCheck.processes.length === 0
+      && !blockedByActiveTarget
     ),
   };
   return { ...plan, planToken: restorePlanToken(plan) };
@@ -466,7 +517,7 @@ async function rewriteRolloutProvider(filePath, sessionId, provider) {
   }));
 }
 
-async function createRestoreSafetyPoint(preview, backupRoot, now) {
+async function createRestoreSafetyPoint(codexHome, preview, backupRoot, now, options) {
   const timestamp = now.toISOString().replaceAll(':', '').replaceAll('.', '').replace('T', '-').replace('Z', '');
   const safetyDir = path.join(backupRoot, 'restore-points', `snapshot-restore-${timestamp}-${preview.sessionId}`);
   await mkdir(safetyDir, { recursive: true });
@@ -492,6 +543,12 @@ async function createRestoreSafetyPoint(preview, backupRoot, now) {
   } finally {
     sourceDb.close();
   }
+  const threadHistory = await prepareThreadHistoryMutation(
+    codexHome,
+    [preview.sessionId],
+    safetyDir,
+    options,
+  );
   const manifestPath = path.join(safetyDir, 'restore-manifest.json');
   await writeFile(manifestPath, JSON.stringify({
     createdAt: now.toISOString(),
@@ -502,9 +559,10 @@ async function createRestoreSafetyPoint(preview, backupRoot, now) {
     rolloutBackup,
     stateDbBackup,
     indexBackup,
+    threadHistoryBackup: threadHistory.backup,
     planToken: preview.planToken,
   }, null, 2), 'utf8');
-  return { safetyDir, manifestPath, rolloutBackup, stateDbBackup, indexBackup };
+  return { safetyDir, manifestPath, rolloutBackup, stateDbBackup, indexBackup, threadHistory };
 }
 
 function appendIndexRow(source, row) {
@@ -534,10 +592,11 @@ function insertThreadRow(db, row) {
 
 export async function applyOperationBackupRestore(codexHome, options = {}) {
   const preview = await previewOperationBackupRestore(codexHome, options);
-  if (preview.blockedByRunningCodex) {
-    throw new CleanerError('CODEX_STILL_RUNNING', 'Close Codex before restoring a session snapshot.', 409, {
-      processes: preview.codexProcessCheck.processes,
-    });
+  if (!options.sessionLocksHeld) {
+    return withTargetSessionLocks(codexHome, [preview.sessionId], {
+      ...options,
+      errorFactory: (code, message, status, details) => new CleanerError(code, message, status, details),
+    }, () => applyOperationBackupRestore(codexHome, { ...options, sessionLocksHeld: true }));
   }
   if (typeof options.planToken !== 'string' || options.planToken !== preview.planToken) {
     throw new CleanerError('STALE_OPERATION_RESTORE_PLAN', 'The snapshot or current Codex state changed after preview.', 409);
@@ -548,7 +607,8 @@ export async function applyOperationBackupRestore(codexHome, options = {}) {
   const backupRoot = options.backupRoot
     || path.join(codexHome, 'backups', 'codex-turn-cleaner');
   const now = options.now instanceof Date ? options.now : new Date();
-  const safety = await createRestoreSafetyPoint(preview, backupRoot, now);
+  const safety = await createRestoreSafetyPoint(codexHome, preview, backupRoot, now, options);
+  const threadHistory = safety.threadHistory;
   let rolloutChanged = false;
   let indexChanged = false;
   let db;
@@ -593,6 +653,9 @@ export async function applyOperationBackupRestore(codexHome, options = {}) {
           throw new CleanerError('SQLITE_THREAD_NOT_FOUND', 'The session row disappeared after preview.', 409);
         }
       }
+    }
+    const historyInvalidation = await invalidateThreadHistory(codexHome, [preview.sessionId], options);
+    if (transactionStarted) {
       db.exec('COMMIT');
       transactionStarted = false;
     }
@@ -601,6 +664,8 @@ export async function applyOperationBackupRestore(codexHome, options = {}) {
       safety,
       restored: preview.summary,
       restartRequired: true,
+      codexRefreshRecommended: preview.codexRunning,
+      threadHistory: { ...threadHistory, invalidation: historyInvalidation },
     };
   } catch (error) {
     if (transactionStarted) {
@@ -842,6 +907,39 @@ export async function previewVisibilityBackupRestore(codexHome, options = {}) {
       fromProvider,
       currentProvider: current.modelProvider,
       currentFingerprint: currentExists,
+    });
+  }
+
+  // Visibility repair may recreate a missing rollout from an older backup.
+  // Roll back only its provider metadata so messages appended afterwards remain intact.
+  const recordedRolloutIds = new Set((manifest.rolloutBackups || []).map((item) => String(item.id)));
+  for (const item of manifest.restores || []) {
+    const id = String(item.id);
+    if (recordedRolloutIds.has(id)) continue;
+    const target = path.resolve(item.targetPath || '');
+    if (!isInsideSessionRoots(codexHome, target)) {
+      conflicts.push({ id, source: 'rollout', reason: 'unsafe_path' });
+      continue;
+    }
+    const currentFingerprint = await pathFingerprint(target);
+    if (!currentFingerprint) {
+      conflicts.push({ id, source: 'rollout', reason: 'current_rollout_missing' });
+      continue;
+    }
+    const current = await readRolloutMetadata(target);
+    const fromProvider = item.fromProvider ?? null;
+    if (current.modelProvider === fromProvider) continue;
+    if (current.modelProvider !== targetProvider) {
+      conflicts.push({ id, source: 'rollout', reason: 'provider_changed_after_backup', currentProvider: current.modelProvider });
+      continue;
+    }
+    rolloutUpdates.push({
+      id,
+      target,
+      fromProvider,
+      currentProvider: current.modelProvider,
+      currentFingerprint,
+      restoredByRepair: true,
     });
   }
 

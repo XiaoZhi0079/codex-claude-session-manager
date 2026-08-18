@@ -13,6 +13,7 @@ import {
 } from 'node:fs/promises';
 
 import {
+  buildCompactConversationPreview,
   CleanerError,
   parseJsonl,
   readRolloutMetadata,
@@ -23,6 +24,12 @@ import {
   buildSessionRegistry,
   detectRunningCodexProcesses,
 } from './registry.mjs';
+import {
+  inspectTargetSessionLocks,
+  invalidateThreadHistory,
+  prepareThreadHistoryMutation,
+  withTargetSessionLocks,
+} from './codex-thread-history.mjs';
 
 function normalizePathKey(value) {
   let comparable = String(value);
@@ -229,6 +236,10 @@ export async function previewSessionDeletion(codexHome, options = {}) {
     + Number(Boolean(threadState.row))
     + indexState.matchingRows;
   const historicalBackupFiles = await managedHistoricalBackupFiles(session, registry.backupRoot);
+  const targetSessionLock = options.sessionLocksHeld
+    ? { available: true, sessions: [], activeSessionIds: [], heldByCleaner: true }
+    : await inspectTargetSessionLocks(codexHome, [sessionId], options);
+  const blockedByActiveTarget = targetSessionLock.activeSessionIds.length > 0;
   const plan = {
     session: {
       id: session.id,
@@ -251,6 +262,8 @@ export async function previewSessionDeletion(codexHome, options = {}) {
     codexProcessCheck,
     codexRunning: codexProcessCheck.processes.length > 0,
     blockedByRunningCodex: false,
+    targetSessionLock,
+    blockedByActiveTarget,
     refreshCodexAfterApply: codexProcessCheck.processes.length > 0,
     deletionBackupRoot: deletionBackupRoot(codexHome, options),
     summary: {
@@ -260,7 +273,7 @@ export async function previewSessionDeletion(codexHome, options = {}) {
       childThreadsKept: threadState.childThreadCount,
       historicalBackupFiles: historicalBackupFiles.length,
     },
-    canApply: actionCount > 0 || historicalBackupFiles.length > 0,
+    canApply: (actionCount > 0 || historicalBackupFiles.length > 0) && !blockedByActiveTarget,
   };
   return { ...plan, planToken: planTokenFor(plan) };
 }
@@ -279,7 +292,7 @@ function removeIndexRows(source, sessionId) {
   return kept.join(newline) + (trailingNewline && kept.length ? newline : '');
 }
 
-async function createDeletionBackup(preview, now) {
+async function createDeletionBackup(codexHome, preview, now, options) {
   const timestamp = now.toISOString().replaceAll(':', '').replaceAll('.', '').replace('T', '-').replace('Z', '');
   const backupDir = path.join(preview.deletionBackupRoot, `${timestamp}-${preview.session.id}`);
   await mkdir(backupDir, { recursive: true });
@@ -306,6 +319,12 @@ async function createDeletionBackup(preview, now) {
       sourceDb.close();
     }
   }
+  const threadHistory = await prepareThreadHistoryMutation(
+    codexHome,
+    [preview.session.id],
+    backupDir,
+    options,
+  );
 
   const manifestPath = path.join(backupDir, 'manifest.json');
   await writeFile(manifestPath, JSON.stringify({
@@ -318,14 +337,21 @@ async function createDeletionBackup(preview, now) {
     sqliteRow: preview.sqliteRow,
     indexPath: preview.indexPath,
     indexBackup,
+    threadHistoryBackup: threadHistory.backup,
     childThreadsKept: preview.childThreadCount,
     planToken: preview.planToken,
   }, null, 2), 'utf8');
-  return { backupDir, manifestPath, rolloutBackup, stateDbBackup, indexBackup };
+  return { backupDir, manifestPath, rolloutBackup, stateDbBackup, indexBackup, threadHistory };
 }
 
 export async function applySessionDeletion(codexHome, options = {}) {
   const preview = await previewSessionDeletion(codexHome, options);
+  if (!options.sessionLocksHeld) {
+    return withTargetSessionLocks(codexHome, [preview.session.id], {
+      ...options,
+      errorFactory: (code, message, status, details) => new CleanerError(code, message, status, details),
+    }, () => applySessionDeletion(codexHome, { ...options, sessionLocksHeld: true }));
+  }
   if (typeof options.planToken !== 'string' || options.planToken !== preview.planToken) {
     throw new CleanerError(
       'STALE_SESSION_DELETE_PLAN',
@@ -338,7 +364,7 @@ export async function applySessionDeletion(codexHome, options = {}) {
   }
 
   const now = options.now instanceof Date ? options.now : new Date();
-  const backup = preview.permanentBackupDeletion ? null : await createDeletionBackup(preview, now);
+  const backup = preview.permanentBackupDeletion ? null : await createDeletionBackup(codexHome, preview, now, options);
   let rolloutRemoved = false;
   let indexChanged = false;
   let db;
@@ -362,6 +388,10 @@ export async function applySessionDeletion(codexHome, options = {}) {
       await writeFileAtomically(preview.indexPath, removeIndexRows(currentIndex, preview.session.id));
       indexChanged = true;
     }
+    for (const historical of preview.historicalBackupFiles) {
+      await unlink(historical.path);
+      removedHistoricalBackups.push(historical.path);
+    }
     if (preview.sqliteRow) {
       const sqlite = await loadSqlite();
       db = new sqlite.DatabaseSync(preview.stateDbPath);
@@ -376,12 +406,11 @@ export async function applySessionDeletion(codexHome, options = {}) {
           409,
         );
       }
+    }
+    const historyInvalidation = await invalidateThreadHistory(codexHome, [preview.session.id], options);
+    if (transactionStarted) {
       db.exec('COMMIT');
       transactionStarted = false;
-    }
-    for (const historical of preview.historicalBackupFiles) {
-      await unlink(historical.path);
-      removedHistoricalBackups.push(historical.path);
     }
     return {
       preview,
@@ -394,18 +423,19 @@ export async function applySessionDeletion(codexHome, options = {}) {
       },
       childThreadsKept: preview.childThreadCount,
       codexRefreshRecommended: preview.codexRunning,
+      threadHistory: { ...backup?.threadHistory, invalidation: historyInvalidation },
     };
   } catch (error) {
     if (transactionStarted) {
       try { db?.exec('ROLLBACK'); } catch { /* Preserve the original error. */ }
     }
     const rollbackErrors = [];
-    if (rolloutRemoved && backup.rolloutBackup) {
+    if (rolloutRemoved && backup?.rolloutBackup) {
       try { await copyFile(backup.rolloutBackup, preview.rolloutPath); } catch (rollbackError) {
         rollbackErrors.push({ target: preview.rolloutPath, message: rollbackError.message });
       }
     }
-    if (indexChanged && backup.indexBackup) {
+    if (indexChanged && backup?.indexBackup) {
       try { await copyFile(backup.indexBackup, preview.indexPath); } catch (rollbackError) {
         rollbackErrors.push({ target: preview.indexPath, message: rollbackError.message });
       }
@@ -604,6 +634,10 @@ export async function previewSessionDeletionBatch(codexHome, options = {}) {
     historicalBackupFiles: sessions.reduce((total, session) => total + session.historicalBackupFiles.length, 0),
     backupOnlySessions: sessions.filter((session) => session.historicalBackupFiles.length > 0).length,
   };
+  const targetSessionLock = options.sessionLocksHeld
+    ? { available: true, sessions: [], activeSessionIds: [], heldByCleaner: true }
+    : await inspectTargetSessionLocks(codexHome, sessionIds, options);
+  const blockedByActiveTarget = targetSessionLock.activeSessionIds.length > 0;
   const plan = {
     sessions,
     summary,
@@ -613,9 +647,11 @@ export async function previewSessionDeletionBatch(codexHome, options = {}) {
     codexProcessCheck,
     codexRunning: codexProcessCheck.processes.length > 0,
     blockedByRunningCodex: false,
+    targetSessionLock,
+    blockedByActiveTarget,
     refreshCodexAfterApply: codexProcessCheck.processes.length > 0,
     deletionBackupRoot: deletionBackupRoot(codexHome, options),
-    canApply: sessions.length > 0,
+    canApply: sessions.length > 0 && !blockedByActiveTarget,
   };
   return { ...plan, planToken: batchPlanTokenFor(plan) };
 }
@@ -635,7 +671,7 @@ function removeBatchIndexRows(source, sessionIds) {
   return kept.join(newline) + (trailingNewline && kept.length ? newline : '');
 }
 
-async function createBatchDeletionBackup(preview, now) {
+async function createBatchDeletionBackup(codexHome, preview, now, options) {
   const timestamp = now.toISOString().replaceAll(':', '').replaceAll('.', '').replace('T', '-').replace('Z', '');
   const backupDir = path.join(
     preview.deletionBackupRoot,
@@ -667,6 +703,12 @@ async function createBatchDeletionBackup(preview, now) {
       sourceDb.close();
     }
   }
+  const threadHistory = await prepareThreadHistoryMutation(
+    codexHome,
+    preview.sessions.map((session) => session.id),
+    backupDir,
+    options,
+  );
   const manifestPath = path.join(backupDir, 'manifest.json');
   await writeFile(manifestPath, JSON.stringify({
     createdAt: now.toISOString(),
@@ -687,13 +729,20 @@ async function createBatchDeletionBackup(preview, now) {
     stateDbBackup,
     indexPath: preview.indexPath,
     indexBackup,
+    threadHistoryBackup: threadHistory.backup,
     planToken: preview.planToken,
   }, null, 2), 'utf8');
-  return { backupDir, manifestPath, rolloutBackups, stateDbBackup, indexBackup };
+  return { backupDir, manifestPath, rolloutBackups, stateDbBackup, indexBackup, threadHistory };
 }
 
 export async function applySessionDeletionBatch(codexHome, options = {}) {
   const preview = await previewSessionDeletionBatch(codexHome, options);
+  if (!options.sessionLocksHeld) {
+    return withTargetSessionLocks(codexHome, preview.sessions.map((session) => session.id), {
+      ...options,
+      errorFactory: (code, message, status, details) => new CleanerError(code, message, status, details),
+    }, () => applySessionDeletionBatch(codexHome, { ...options, sessionLocksHeld: true }));
+  }
   if (typeof options.planToken !== 'string' || options.planToken !== preview.planToken) {
     throw new CleanerError(
       'STALE_SESSION_DELETE_PLAN',
@@ -705,7 +754,9 @@ export async function applySessionDeletionBatch(codexHome, options = {}) {
   const hasRecoverableDeletion = preview.summary.rolloutFiles > 0
     || preview.summary.sqliteRows > 0
     || preview.summary.indexRows > 0;
-  const backup = hasRecoverableDeletion ? await createBatchDeletionBackup(preview, now) : null;
+  const backup = hasRecoverableDeletion
+    ? await createBatchDeletionBackup(codexHome, preview, now, options)
+    : null;
   const backupById = new Map((backup?.rolloutBackups || []).map((item) => [item.id, item.backup]));
   const removedRollouts = [];
   let indexChanged = false;
@@ -730,6 +781,12 @@ export async function applySessionDeletionBatch(codexHome, options = {}) {
       );
       indexChanged = true;
     }
+    for (const session of preview.sessions) {
+      for (const historical of session.historicalBackupFiles) {
+        await unlink(historical.path);
+        removedHistoricalBackups.push(historical.path);
+      }
+    }
     const sqliteSessions = preview.sessions.filter((session) => session.sqliteRow);
     if (sqliteSessions.length) {
       const sqlite = await loadSqlite();
@@ -749,14 +806,15 @@ export async function applySessionDeletionBatch(codexHome, options = {}) {
           );
         }
       }
+    }
+    const historyInvalidation = await invalidateThreadHistory(
+      codexHome,
+      preview.sessions.map((session) => session.id),
+      options,
+    );
+    if (transactionStarted) {
       db.exec('COMMIT');
       transactionStarted = false;
-    }
-    for (const session of preview.sessions) {
-      for (const historical of session.historicalBackupFiles) {
-        await unlink(historical.path);
-        removedHistoricalBackups.push(historical.path);
-      }
     }
     return {
       preview,
@@ -766,6 +824,7 @@ export async function applySessionDeletionBatch(codexHome, options = {}) {
         historicalBackupFiles: removedHistoricalBackups.length,
       },
       codexRefreshRecommended: preview.codexRunning,
+      threadHistory: { ...backup?.threadHistory, invalidation: historyInvalidation },
     };
   } catch (error) {
     if (transactionStarted) {
@@ -779,7 +838,7 @@ export async function applySessionDeletionBatch(codexHome, options = {}) {
         rollbackErrors.push({ target: session.rolloutPath, message: rollbackError.message });
       }
     }
-    if (indexChanged && backup.indexBackup) {
+    if (indexChanged && backup?.indexBackup) {
       try { await copyFile(backup.indexBackup, preview.indexPath); } catch (rollbackError) {
         rollbackErrors.push({ target: preview.indexPath, message: rollbackError.message });
       }
@@ -984,6 +1043,89 @@ async function readDeletionBackup(codexHome, backupId, options) {
   };
 }
 
+export async function readSessionDeletionBackupContent(codexHome, options = {}) {
+  const backupId = String(options.backupId || '').trim();
+  const sessionId = String(options.sessionId || '').trim();
+  if (!backupId || !sessionId) {
+    throw new CleanerError('MISSING_BACKUP_SESSION', 'Select a backup session before viewing its content.', 400);
+  }
+  const backup = await readDeletionBackup(codexHome, backupId, options);
+  const manifestSession = backup.sessions.find((session) => session.id === sessionId);
+  if (!manifestSession) {
+    throw new CleanerError('BACKUP_SESSION_NOT_FOUND', 'The selected session is not contained in this backup.', 404, { sessionId });
+  }
+  const rolloutBackup = backup.rolloutById.get(sessionId) || null;
+  if (!rolloutBackup?.backup) {
+    return {
+      backupId,
+      session: {
+        id: sessionId,
+        title: manifestSession.title || manifestSession.sqliteRow?.title || '(untitled)',
+        projectPath: manifestSession.projectPath || manifestSession.sqliteRow?.cwd || null,
+      },
+      contentAvailable: false,
+      unavailableReason: '该备份只有 SQLite 或索引元数据，没有可读取的 rollout 正文。',
+      comparison: { state: 'metadata_only', label: '仅元数据', currentExists: false },
+      content: null,
+    };
+  }
+
+  const backupSource = await readFile(rolloutBackup.backup, 'utf8');
+  const records = parseJsonl(backupSource, rolloutBackup.backup);
+  const metadata = await readRolloutMetadata(rolloutBackup.backup);
+  if (metadata.id !== sessionId) {
+    throw new CleanerError('BACKUP_SESSION_MISMATCH', 'The rollout backup does not match the selected session ID.', 422, {
+      expectedId: sessionId,
+      actualId: metadata.id,
+    });
+  }
+  const backupFingerprint = await fileFingerprint(rolloutBackup.backup);
+  const rolloutTarget = manifestSession.rolloutPath || rolloutBackup.source || null;
+  if (rolloutTarget && !isInsideSessionRoots(codexHome, rolloutTarget)) {
+    throw new CleanerError('UNSAFE_RESTORE_PATH', 'The backed-up rollout target is outside Codex session storage.', 422, { rolloutTarget });
+  }
+  let currentFingerprint = null;
+  let currentSummary = null;
+  if (rolloutTarget) {
+    try {
+      currentFingerprint = await fileFingerprint(rolloutTarget);
+      try {
+        const currentRecords = parseJsonl(await readFile(rolloutTarget, 'utf8'), rolloutTarget);
+        const current = buildCompactConversationPreview(currentRecords, { offset: 0, limit: 1 });
+        currentSummary = {
+          recordCount: current.recordCount,
+          turnCount: current.turnCount,
+          messageCount: current.messageCount,
+        };
+      } catch (error) {
+        currentSummary = { parseError: error.message };
+      }
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+  }
+  const identical = Boolean(currentFingerprint && currentFingerprint.sha256 === backupFingerprint.sha256);
+  const comparison = currentFingerprint
+    ? (identical
+      ? { state: 'identical', label: '当前内容与备份一致', currentExists: true }
+      : { state: 'different', label: '当前正文与备份不同，删除备份恢复会拒绝覆盖', currentExists: true })
+    : { state: 'missing', label: '当前正文缺失，可从此备份恢复', currentExists: false };
+
+  return {
+    backupId,
+    createdAt: backup.manifest.createdAt || null,
+    session: {
+      id: sessionId,
+      title: manifestSession.title || metadata.summary || '(untitled)',
+      projectPath: manifestSession.projectPath || metadata.projectPath || null,
+    },
+    provider: { backup: metadata.modelProvider || null },
+    contentAvailable: true,
+    comparison: { ...comparison, current: currentSummary },
+    content: buildCompactConversationPreview(records, options),
+  };
+}
+
 async function readBackupIndexRows(backup, sessionIds) {
   if (!backup.indexBackup) return new Map();
   const selected = new Set(sessionIds);
@@ -1036,7 +1178,6 @@ function restorePlanTokenFor(plan) {
       sqliteRow: session.sqliteRow,
       indexRow: session.indexRow,
     })),
-    processIds: plan.codexProcessCheck.processes.map((item) => item.pid).sort((a, b) => a - b),
   })).digest('hex');
 }
 
@@ -1148,6 +1289,10 @@ export async function previewSessionDeletionBackupRestore(codexHome, options = {
     )).length,
   };
   const actionCount = summary.rolloutFiles + summary.sqliteRows + summary.indexRows;
+  const targetSessionLock = options.sessionLocksHeld
+    ? { available: true, sessions: [], activeSessionIds: [], heldByCleaner: true }
+    : await inspectTargetSessionLocks(codexHome, sessionIds, options);
+  const blockedByActiveTarget = targetSessionLock.activeSessionIds.length > 0;
   const plan = {
     backupId,
     backupDir: backup.backupDir,
@@ -1156,12 +1301,16 @@ export async function previewSessionDeletionBackupRestore(codexHome, options = {
     indexPath: indexState.indexPath,
     indexSourceHash: indexState.sourceHash,
     codexProcessCheck,
-    blockedByRunningCodex: codexProcessCheck.processes.length > 0,
+    codexRunning: codexProcessCheck.processes.length > 0,
+    blockedByRunningCodex: false,
+    targetSessionLock,
+    blockedByActiveTarget,
+    refreshCodexAfterApply: codexProcessCheck.processes.length > 0,
     sessions,
     summary,
     canApply: actionCount > 0
       && summary.conflicts === 0
-      && codexProcessCheck.processes.length === 0,
+      && !blockedByActiveTarget,
   };
   return { ...plan, planToken: restorePlanTokenFor(plan) };
 }
@@ -1200,7 +1349,7 @@ function appendRestoredIndexRows(source, rows) {
   return `${trimmed}${trimmed ? newline : ''}${additions}${additions ? newline : ''}`;
 }
 
-async function createRestoreSafetyBackup(preview, backupRoot, now) {
+async function createRestoreSafetyBackup(codexHome, preview, backupRoot, now, options) {
   const timestamp = now.toISOString().replaceAll(':', '').replaceAll('.', '').replace('T', '-').replace('Z', '');
   const safetyDir = path.join(backupRoot, 'restore-points', `restore-${timestamp}-${preview.backupId}`);
   await mkdir(safetyDir, { recursive: true });
@@ -1224,6 +1373,12 @@ async function createRestoreSafetyBackup(preview, backupRoot, now) {
       sourceDb.close();
     }
   }
+  const threadHistory = await prepareThreadHistoryMutation(
+    codexHome,
+    preview.sessions.map((session) => session.id),
+    safetyDir,
+    options,
+  );
   const manifestPath = path.join(safetyDir, 'restore-manifest.json');
   await writeFile(manifestPath, JSON.stringify({
     createdAt: now.toISOString(),
@@ -1231,9 +1386,10 @@ async function createRestoreSafetyBackup(preview, backupRoot, now) {
     sessionIds: preview.sessions.map((session) => session.id),
     stateDbBackup,
     indexBackup,
+    threadHistoryBackup: threadHistory.backup,
     planToken: preview.planToken,
   }, null, 2), 'utf8');
-  return { safetyDir, manifestPath, stateDbBackup, indexBackup };
+  return { safetyDir, manifestPath, stateDbBackup, indexBackup, threadHistory };
 }
 
 function insertSqliteRows(db, sessions, provider) {
@@ -1265,13 +1421,11 @@ function insertSqliteRows(db, sessions, provider) {
 
 export async function applySessionDeletionBackupRestore(codexHome, options = {}) {
   const preview = await previewSessionDeletionBackupRestore(codexHome, options);
-  if (preview.blockedByRunningCodex) {
-    throw new CleanerError(
-      'CODEX_STILL_RUNNING',
-      'Close every Codex window and terminal session before restoring deleted sessions.',
-      409,
-      { processes: preview.codexProcessCheck.processes },
-    );
+  if (!options.sessionLocksHeld) {
+    return withTargetSessionLocks(codexHome, preview.sessions.map((session) => session.id), {
+      ...options,
+      errorFactory: (code, message, status, details) => new CleanerError(code, message, status, details),
+    }, () => applySessionDeletionBackupRestore(codexHome, { ...options, sessionLocksHeld: true }));
   }
   if (preview.summary.conflicts > 0) {
     throw new CleanerError(
@@ -1293,7 +1447,7 @@ export async function applySessionDeletionBackupRestore(codexHome, options = {})
   const ordinaryBackupRoot = options.backupRoot
     || path.join(codexHome, 'backups', 'codex-turn-cleaner');
   const now = options.now instanceof Date ? options.now : new Date();
-  const safety = await createRestoreSafetyBackup(preview, ordinaryBackupRoot, now);
+  const safety = await createRestoreSafetyBackup(codexHome, preview, ordinaryBackupRoot, now, options);
   const copiedRollouts = [];
   let indexChanged = false;
   let db;
@@ -1339,6 +1493,13 @@ export async function applySessionDeletionBackupRestore(codexHome, options = {})
       db.exec('BEGIN IMMEDIATE');
       transactionStarted = true;
       insertSqliteRows(db, sqliteSessions, preview.currentProvider);
+    }
+    const historyInvalidation = await invalidateThreadHistory(
+      codexHome,
+      preview.sessions.map((session) => session.id),
+      options,
+    );
+    if (transactionStarted) {
       db.exec('COMMIT');
       transactionStarted = false;
     }
@@ -1347,6 +1508,8 @@ export async function applySessionDeletionBackupRestore(codexHome, options = {})
       safety,
       restored: preview.summary,
       restartRequired: true,
+      codexRefreshRecommended: preview.codexRunning,
+      threadHistory: { ...safety.threadHistory, invalidation: historyInvalidation },
     };
   } catch (error) {
     if (transactionStarted) {

@@ -14,6 +14,7 @@ import {
   previewCleanup,
   previewMessageEdits,
   readRollout,
+  readRolloutMetadata,
   readTurnMessageDetail,
   restoreRolloutBackup,
 } from './core.mjs';
@@ -32,6 +33,7 @@ import {
   previewSessionDeletionBatch,
   previewSessionDeletionBackupRestore,
   previewSessionDeletion,
+  readSessionDeletionBackupContent,
 } from './session-delete.mjs';
 import {
   applyOperationBackupRestore,
@@ -42,9 +44,11 @@ import {
   listSystemBackups,
   previewOperationBackupRestore,
   previewVisibilityBackupRestore,
+  readOperationBackupContent,
 } from './operation-backup.mjs';
 import { diagnoseSessionHealth } from './session-health.mjs';
 import { createOperationHistory } from './operation-history.mjs';
+import { inspectTargetSessionLocks } from './codex-thread-history.mjs';
 import {
   buildClaudeSessionRegistry,
   getDefaultClaudeHome,
@@ -59,6 +63,7 @@ import {
   listClaudeSessionDeletionBackups,
   previewClaudeSessionDeletion,
   previewClaudeSessionDeletionBackupRestore,
+  readClaudeSessionDeletionBackupContent,
 } from './claude-session-delete.mjs';
 import {
   applyClaudeTurnDeletion,
@@ -199,6 +204,29 @@ async function resolveRolloutFromBody(codexHome, body, sessions = null) {
   return session.rolloutPath;
 }
 
+async function resolveMutationTarget(codexHome, body, sessions = null) {
+  const rolloutPath = await resolveRolloutFromBody(codexHome, body, sessions);
+  const metadata = await readRolloutMetadata(rolloutPath);
+  const requestedSessionId = typeof body.sessionId === 'string' && body.sessionId.trim()
+    ? body.sessionId.trim()
+    : null;
+  if (requestedSessionId && metadata.id && requestedSessionId !== metadata.id) {
+    throw new CleanerError(
+      'SESSION_ROLLOUT_MISMATCH',
+      'The selected session does not match the rollout metadata.',
+      409,
+      { requestedSessionId, rolloutSessionId: metadata.id },
+    );
+  }
+  const sessionId = requestedSessionId || metadata.id || null;
+  if (!sessionId) {
+    throw new CleanerError('MISSING_SESSION_ID', 'The rollout does not identify its Codex session.', 422, {
+      rolloutPath,
+    });
+  }
+  return { rolloutPath, sessionId };
+}
+
 export function createCleanerServer(options = {}) {
   const env = options.env || process.env;
   const codexHome = options.codexHome || getDefaultCodexHome(env);
@@ -238,8 +266,14 @@ export function createCleanerServer(options = {}) {
 
   async function executeUndo(undo) {
     if (undo.type === 'rollout_restore') {
-      return restoreRolloutBackup({
+      const target = await resolveMutationTarget(codexHome, {
         rolloutPath: undo.rolloutPath,
+        sessionId: undo.sessionId,
+      });
+      return restoreRolloutBackup({
+        codexHome,
+        sessionId: target.sessionId,
+        rolloutPath: target.rolloutPath,
         backupPath: undo.backupPath,
         expectedCurrentHash: undo.expectedCurrentHash,
         backupRoot,
@@ -563,6 +597,18 @@ export function createCleanerServer(options = {}) {
         return;
       }
 
+      if (requestUrl.pathname === '/api/claude-code/session-deletion-backups/content' && request.method === 'POST') {
+        const body = await readJsonRequest(request);
+        sendJson(response, 200, await readClaudeSessionDeletionBackupContent(claudeHome, {
+          backupRoot: claudeBackupRoot,
+          backupId: body.backupId,
+          sessionId: body.sessionId,
+          offset: body.offset,
+          limit: body.limit,
+        }));
+        return;
+      }
+
       if (requestUrl.pathname === '/api/claude-code/session-deletion-backups/restore-apply' && request.method === 'POST') {
         const body = await readJsonRequest(request);
         if (body.confirmation !== 'RESTORE') {
@@ -744,6 +790,19 @@ export function createCleanerServer(options = {}) {
         return;
       }
 
+      if (requestUrl.pathname === '/api/deletion-backups/content' && request.method === 'POST') {
+        const body = await readJsonRequest(request);
+        sendJson(response, 200, await readSessionDeletionBackupContent(codexHome, {
+          backupRoot,
+          env,
+          backupId: body.backupId,
+          sessionId: body.sessionId,
+          offset: body.offset,
+          limit: body.limit,
+        }));
+        return;
+      }
+
       if (requestUrl.pathname === '/api/deletion-backups/restore-apply' && request.method === 'POST') {
         const body = await readJsonRequest(request);
         if (body.confirmation !== 'RESTORE') {
@@ -803,6 +862,18 @@ export function createCleanerServer(options = {}) {
           backupRoot,
           env,
           backupId: body.backupId,
+        }));
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/operation-backups/content' && request.method === 'POST') {
+        const body = await readJsonRequest(request);
+        sendJson(response, 200, await readOperationBackupContent(codexHome, {
+          backupRoot,
+          env,
+          backupId: body.backupId,
+          offset: body.offset,
+          limit: body.limit,
         }));
         return;
       }
@@ -982,14 +1053,18 @@ export function createCleanerServer(options = {}) {
       if (requestUrl.pathname === '/api/edit-preview' && request.method === 'POST') {
         const body = await readJsonRequest(request);
         const sessions = body.rolloutPath ? null : await loadSessions();
-        const rolloutPath = await resolveRolloutFromBody(codexHome, body, sessions);
+        const { rolloutPath, sessionId } = await resolveMutationTarget(codexHome, body, sessions);
         const result = await previewMessageEdits({
           rolloutPath,
           selector: requireSelector(body),
           edits: body.edits,
           sourceHash: body.sourceHash,
         });
-        sendJson(response, 200, { backupRoot, ...result });
+        sendJson(response, 200, {
+          backupRoot,
+          ...result,
+          targetSessionLock: await inspectTargetSessionLocks(codexHome, [sessionId]),
+        });
         return;
       }
 
@@ -999,12 +1074,14 @@ export function createCleanerServer(options = {}) {
           throw new CleanerError('EDIT_CONFIRMATION_REQUIRED', 'Type EDIT to apply message changes.', 400);
         }
         const sessions = body.rolloutPath ? null : await loadSessions();
-        const rolloutPath = await resolveRolloutFromBody(codexHome, body, sessions);
+        const { rolloutPath, sessionId } = await resolveMutationTarget(codexHome, body, sessions);
         const result = await executeRecordedOperation({
           kind: 'message_edit',
           label: '编辑会话消息',
-          sessionIds: body.sessionId ? [body.sessionId] : [],
+          sessionIds: [sessionId],
         }, () => applyMessageEdits({
+          codexHome,
+          sessionId,
           rolloutPath,
           selector: requireSelector(body),
           edits: body.edits,
@@ -1014,6 +1091,7 @@ export function createCleanerServer(options = {}) {
           result: { editedMessages: value.preview?.summary?.changedMessages || value.preview?.edits?.length || 0 },
           undo: {
             type: 'rollout_restore',
+            sessionId,
             rolloutPath: value.rolloutPath,
             backupPath: value.backupFile,
             expectedCurrentHash: value.sourceHashAfter,
@@ -1030,12 +1108,14 @@ export function createCleanerServer(options = {}) {
           throw new CleanerError('RESTORE_CONFIRMATION_REQUIRED', 'Type RESTORE to undo this edit.', 400);
         }
         const sessions = body.rolloutPath ? null : await loadSessions();
-        const rolloutPath = await resolveRolloutFromBody(codexHome, body, sessions);
+        const { rolloutPath, sessionId } = await resolveMutationTarget(codexHome, body, sessions);
         const result = await executeRecordedOperation({
           kind: 'message_edit_restore',
           label: '恢复编辑前的会话消息',
-          sessionIds: body.sessionId ? [body.sessionId] : [],
+          sessionIds: [sessionId],
         }, () => restoreRolloutBackup({
+          codexHome,
+          sessionId,
           rolloutPath,
           backupPath: body.backupPath,
           expectedCurrentHash: body.expectedCurrentHash,
@@ -1044,6 +1124,7 @@ export function createCleanerServer(options = {}) {
           result: { restoredFrom: value.restoredFrom },
           undo: {
             type: 'rollout_restore',
+            sessionId,
             rolloutPath: value.rolloutPath,
             backupPath: value.restorePointFile,
             expectedCurrentHash: value.sourceHashAfter,
@@ -1057,7 +1138,7 @@ export function createCleanerServer(options = {}) {
       if (requestUrl.pathname === '/api/preview' && request.method === 'POST') {
         const body = await readJsonRequest(request);
         const sessions = body.rolloutPath ? null : await loadSessions();
-        const rolloutPath = await resolveRolloutFromBody(codexHome, body, sessions);
+        const { rolloutPath, sessionId } = await resolveMutationTarget(codexHome, body, sessions);
         const mode = requireCleanupMode(body);
         sendJson(response, 200, {
           backupRoot,
@@ -1066,6 +1147,7 @@ export function createCleanerServer(options = {}) {
             selector: requireSelector(body),
             mode,
           }),
+          targetSessionLock: await inspectTargetSessionLocks(codexHome, [sessionId]),
         });
         return;
       }
@@ -1076,22 +1158,25 @@ export function createCleanerServer(options = {}) {
           throw new CleanerError('CONFIRMATION_REQUIRED', 'Type DELETE to apply this change.', 400);
         }
         const sessions = body.rolloutPath ? null : await loadSessions();
-        const rolloutPath = await resolveRolloutFromBody(codexHome, body, sessions);
+        const { rolloutPath, sessionId } = await resolveMutationTarget(codexHome, body, sessions);
         const mode = requireCleanupMode(body);
         const result = await executeRecordedOperation({
           kind: mode === CLEANUP_MODES.SINGLE ? 'turn_delete_single' : 'turn_delete_truncate',
           label: mode === CLEANUP_MODES.SINGLE ? '删除选中轮次' : '从选中轮次开始清理',
-          sessionIds: body.sessionId ? [body.sessionId] : [],
+          sessionIds: [sessionId],
         }, () => applyCleanup({
+          codexHome,
+          sessionId,
           rolloutPath,
           selector: requireSelector(body),
           mode,
           sourceHash: body.sourceHash,
           backupRoot,
         }), (value) => ({
-          result: { removedRecords: value.preview?.removedRecords?.length || value.preview?.summary?.removedRecords || 0 },
+          result: { removedRecords: value.preview?.removedCount || 0 },
           undo: {
             type: 'rollout_restore',
+            sessionId,
             rolloutPath: value.rolloutPath,
             backupPath: value.backupFile,
             expectedCurrentHash: value.sourceHashAfter,

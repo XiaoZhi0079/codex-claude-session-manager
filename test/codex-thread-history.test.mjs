@@ -1,0 +1,231 @@
+import assert from 'node:assert/strict';
+import { access, mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import test from 'node:test';
+import { DatabaseSync } from 'node:sqlite';
+
+import {
+  backupThreadHistoryDatabase,
+  inspectTargetSessionLocks,
+  invalidateThreadHistory,
+  prepareThreadHistoryMutation,
+  readThreadHistoryState,
+  resolveThreadHistoryDbPath,
+  withTargetSessionLocks,
+} from '../src/codex-thread-history.mjs';
+import {
+  applyCleanup,
+  CLEANUP_MODES,
+  hashRolloutSource,
+} from '../src/core.mjs';
+
+const TARGET_ID = '019faa00-aaaa-7222-8333-444455556666';
+const OTHER_ID = '019faa00-bbbb-7222-8333-444455556666';
+
+async function historyFixture() {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codex-thread-history-'));
+  const codexHome = path.join(root, '.codex');
+  await mkdir(codexHome, { recursive: true });
+  const dbPath = path.join(codexHome, 'thread_history_1.sqlite');
+  const db = new DatabaseSync(dbPath);
+  db.exec(`
+    CREATE TABLE thread_history_projection_state (
+      thread_id TEXT PRIMARY KEY,
+      next_rollout_byte_offset INTEGER NOT NULL,
+      next_rollout_ordinal INTEGER NOT NULL
+    );
+    CREATE TABLE thread_turns (thread_id TEXT NOT NULL, turn_id TEXT NOT NULL);
+    CREATE TABLE thread_items (thread_id TEXT NOT NULL, item_id TEXT NOT NULL);
+  `);
+  const projection = db.prepare('INSERT INTO thread_history_projection_state VALUES (?, ?, ?)');
+  const turn = db.prepare('INSERT INTO thread_turns VALUES (?, ?)');
+  const item = db.prepare('INSERT INTO thread_items VALUES (?, ?)');
+  for (const id of [TARGET_ID, OTHER_ID]) {
+    projection.run(id, 120, 4);
+    turn.run(id, `${id}-turn`);
+    item.run(id, `${id}-item-1`);
+    item.run(id, `${id}-item-2`);
+  }
+  db.close();
+  return { root, codexHome, dbPath };
+}
+
+async function exists(filePath) {
+  try {
+    await access(filePath);
+    return true;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+test('thread history resolution uses the newest supported database', async () => {
+  const data = await historyFixture();
+  const newer = path.join(data.codexHome, 'thread_history_3.sqlite');
+  await writeFile(newer, '', 'utf8');
+  assert.equal(await resolveThreadHistoryDbPath(data.codexHome), newer);
+});
+
+test('configured SQLite home takes precedence over higher-version default databases', async () => {
+  const data = await historyFixture();
+  const configuredRoot = path.join(data.root, 'configured-sqlite');
+  await mkdir(configuredRoot, { recursive: true });
+  const configuredDb = path.join(configuredRoot, 'thread_history_1.sqlite');
+  await writeFile(configuredDb, '', 'utf8');
+  await writeFile(path.join(data.codexHome, 'thread_history_9.sqlite'), '', 'utf8');
+  assert.equal(await resolveThreadHistoryDbPath(data.codexHome, {
+    env: { CODEX_SQLITE_HOME: configuredRoot },
+  }), configuredDb);
+});
+
+test('target invalidation preserves every other session and creates a valid backup', async () => {
+  const data = await historyFixture();
+  const backupDir = path.join(data.root, 'backup');
+  const prepared = await prepareThreadHistoryMutation(data.codexHome, [TARGET_ID], backupDir);
+  assert.equal(prepared.affected, true);
+  assert.equal(await exists(prepared.backup.backupPath), true);
+
+  const backupDb = new DatabaseSync(prepared.backup.backupPath, { readOnly: true });
+  assert.equal(backupDb.prepare('SELECT COUNT(*) AS count FROM thread_items').get().count, 4);
+  backupDb.close();
+
+  const result = await invalidateThreadHistory(data.codexHome, [TARGET_ID]);
+  assert.deepEqual(
+    { projectionRows: result.projectionRows, turnRows: result.turnRows, itemRows: result.itemRows },
+    { projectionRows: 1, turnRows: 1, itemRows: 2 },
+  );
+  const state = await readThreadHistoryState(data.codexHome, [TARGET_ID, OTHER_ID]);
+  const target = state.sessions.find((session) => session.sessionId === TARGET_ID);
+  const other = state.sessions.find((session) => session.sessionId === OTHER_ID);
+  assert.deepEqual({ projection: target.projection, turns: target.turnRows, items: target.itemRows }, {
+    projection: null,
+    turns: 0,
+    items: 0,
+  });
+  assert.equal(other.projection.next_rollout_byte_offset, 120);
+  assert.equal(other.projection.next_rollout_ordinal, 4);
+  assert.equal(other.turnRows, 1);
+  assert.equal(other.itemRows, 2);
+});
+
+test('database backup helper safely snapshots the current thread history', async () => {
+  const data = await historyFixture();
+  const result = await backupThreadHistoryDatabase(data.codexHome, path.join(data.root, 'backup'));
+  assert.equal(await exists(result.backupPath), true);
+  const backupDb = new DatabaseSync(result.backupPath, { readOnly: true });
+  assert.equal(backupDb.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+  backupDb.close();
+});
+
+test('cleanup backs up and invalidates only the selected paginated session', async () => {
+  const data = await historyFixture();
+  const rolloutPath = path.join(data.root, `rollout-${TARGET_ID}.jsonl`);
+  const source = [
+    { type: 'session_meta', payload: { id: TARGET_ID } },
+    { type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-1' } },
+    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-1' } },
+    { type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-2' } },
+    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-2' } },
+  ].map((record) => JSON.stringify(record)).join('\n') + '\n';
+  await writeFile(rolloutPath, source, 'utf8');
+
+  const result = await applyCleanup({
+    codexHome: data.codexHome,
+    sessionId: TARGET_ID,
+    rolloutPath,
+    selector: { turnId: 'turn-2' },
+    mode: CLEANUP_MODES.TRUNCATE,
+    sourceHash: hashRolloutSource(source),
+    backupRoot: path.join(data.root, 'backups'),
+    onThreadHistoryInvalidated: async ({ validatedSource }) => {
+      const diskSource = await readFile(rolloutPath, 'utf8');
+      assert.equal(diskSource, validatedSource);
+      assert.equal(diskSource.includes('turn-2'), false);
+    },
+  });
+  assert.equal(result.threadHistory.invalidation.projectionRows, 1);
+  assert.equal(await exists(result.threadHistory.backup.backupPath), true);
+  const state = await readThreadHistoryState(data.codexHome, [TARGET_ID, OTHER_ID]);
+  assert.equal(state.sessions[0].projection, null);
+  assert.notEqual(state.sessions[1].projection, null);
+});
+
+test('cleanup invalidates a stale projection created after the write-side backup check', async () => {
+  const data = await historyFixture();
+  const rolloutPath = path.join(data.root, `rollout-${TARGET_ID}.jsonl`);
+  const source = [
+    { type: 'session_meta', payload: { id: TARGET_ID } },
+    { type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-1' } },
+    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-1' } },
+    { type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-2' } },
+    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-2' } },
+  ].map((record) => JSON.stringify(record)).join('\n') + '\n';
+  await writeFile(rolloutPath, source, 'utf8');
+
+  const before = new DatabaseSync(data.dbPath);
+  before.prepare('DELETE FROM thread_items WHERE thread_id = ?').run(TARGET_ID);
+  before.prepare('DELETE FROM thread_turns WHERE thread_id = ?').run(TARGET_ID);
+  before.prepare('DELETE FROM thread_history_projection_state WHERE thread_id = ?').run(TARGET_ID);
+  before.close();
+
+  const result = await applyCleanup({
+    codexHome: data.codexHome,
+    sessionId: TARGET_ID,
+    rolloutPath,
+    selector: { turnId: 'turn-2' },
+    mode: CLEANUP_MODES.TRUNCATE,
+    sourceHash: hashRolloutSource(source),
+    backupRoot: path.join(data.root, 'backups'),
+    onThreadHistoryPrepared: async ({ affected }) => {
+      assert.equal(affected, false);
+      const raced = new DatabaseSync(data.dbPath);
+      raced.prepare('INSERT INTO thread_history_projection_state VALUES (?, 999, 9)').run(TARGET_ID);
+      raced.prepare('INSERT INTO thread_turns VALUES (?, ?)').run(TARGET_ID, 'stale-turn');
+      raced.prepare('INSERT INTO thread_items VALUES (?, ?)').run(TARGET_ID, 'stale-item');
+      raced.close();
+    },
+  });
+
+  assert.equal(result.threadHistory.affected, false);
+  assert.deepEqual(
+    {
+      projectionRows: result.threadHistory.invalidation.projectionRows,
+      turnRows: result.threadHistory.invalidation.turnRows,
+      itemRows: result.threadHistory.invalidation.itemRows,
+    },
+    { projectionRows: 1, turnRows: 1, itemRows: 1 },
+  );
+  const state = await readThreadHistoryState(data.codexHome, [TARGET_ID, OTHER_ID]);
+  assert.equal(state.sessions[0].projection, null);
+  assert.notEqual(state.sessions[1].projection, null);
+});
+
+test('target locks block the active session but allow unrelated sessions', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codex-thread-lock-'));
+  const codexHome = path.join(root, '.codex');
+  await mkdir(codexHome, { recursive: true });
+
+  const before = await inspectTargetSessionLocks(codexHome, [TARGET_ID]);
+  assert.deepEqual(before.activeSessionIds, []);
+
+  await withTargetSessionLocks(codexHome, [TARGET_ID], {}, async () => {
+    const held = await inspectTargetSessionLocks(codexHome, [TARGET_ID, OTHER_ID]);
+    assert.deepEqual(held.activeSessionIds, [TARGET_ID]);
+    let unrelatedRan = false;
+    await withTargetSessionLocks(codexHome, [OTHER_ID], {}, async () => {
+      unrelatedRan = true;
+    });
+    assert.equal(unrelatedRan, true);
+    await assert.rejects(
+      withTargetSessionLocks(codexHome, [TARGET_ID], {}, async () => {}),
+      (error) => error?.code === 'TARGET_SESSION_ACTIVE',
+    );
+  });
+
+  const after = await inspectTargetSessionLocks(codexHome, [TARGET_ID]);
+  assert.deepEqual(after.activeSessionIds, []);
+});

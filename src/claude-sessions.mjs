@@ -179,6 +179,54 @@ function buildTurns(records) {
   return turns;
 }
 
+export function buildClaudeCompactConversationPreview(source, sourcePath = 'backup.jsonl', rawOptions = {}) {
+  const parsed = parseJsonlTolerant(source, sourcePath);
+  const turns = buildTurns(parsed.records);
+  const offsetValue = Number(rawOptions.offset ?? 0);
+  const limitValue = Number(rawOptions.limit ?? 80);
+  const offset = Number.isInteger(offsetValue) && offsetValue >= 0 ? offsetValue : 0;
+  const limit = Number.isInteger(limitValue) ? Math.min(Math.max(limitValue, 1), 200) : 80;
+  const maxMessageChars = 16_000;
+  const messages = [];
+  let truncatedMessageCount = 0;
+  let turnCursor = 0;
+  for (const record of parsed.records) {
+    const role = record.data?.message?.role;
+    if (role !== 'user' && role !== 'assistant') continue;
+    if (role === 'user' && !isActualUserPrompt(record)) continue;
+    const text = visibleMessageText(record);
+    if (!text) continue;
+    while (turnCursor + 1 < turns.length && record.lineNumber >= turns[turnCursor + 1].startLine) turnCursor += 1;
+    const turn = turns[turnCursor] && record.lineNumber >= turns[turnCursor].startLine ? turns[turnCursor] : null;
+    const truncated = text.length > maxMessageChars;
+    if (truncated) truncatedMessageCount += 1;
+    messages.push({
+      role,
+      phase: role === 'assistant' ? 'final_answer' : null,
+      lineNumber: record.lineNumber,
+      turnIndex: turn?.index ?? null,
+      text: truncated ? `${text.slice(0, maxMessageChars)}\n\n[内容过长，已截断]` : text,
+      truncated,
+    });
+  }
+
+  const end = Math.min(messages.length, offset + limit);
+  return {
+    messages: messages.slice(offset, end),
+    recordCount: parsed.records.length,
+    parseErrorCount: parsed.parseErrors.length,
+    turnCount: turns.length,
+    messageCount: messages.length,
+    truncatedMessageCount,
+    page: {
+      offset,
+      limit,
+      nextOffset: end < messages.length ? end : null,
+      previousOffset: offset > 0 ? Math.max(0, offset - limit) : null,
+    },
+  };
+}
+
 function readTitle(records, indexEntry) {
   const custom = [...records].reverse().find((record) => (
     record.data?.type === 'custom-title' && typeof record.data?.customTitle === 'string'

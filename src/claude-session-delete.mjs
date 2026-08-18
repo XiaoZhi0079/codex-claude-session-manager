@@ -3,7 +3,7 @@ import { cp, lstat, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/prom
 import path from 'node:path';
 
 import { CleanerError, writeFileAtomically } from './core.mjs';
-import { buildClaudeSessionRegistry } from './claude-sessions.mjs';
+import { buildClaudeCompactConversationPreview, buildClaudeSessionRegistry } from './claude-sessions.mjs';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const BACKUP_ID_PATTERN = /^delete-\d{8}T\d{6}-[0-9a-f]{8}$/i;
@@ -495,6 +495,38 @@ async function readBackup(claudeHome, backupId, options = {}) {
   try { manifest = JSON.parse(await readFile(manifestPath, 'utf8')); } catch { throw new CleanerError('INVALID_CLAUDE_BACKUP', 'Claude deletion backup manifest is invalid.', 422, { backupId }); }
   validateManifest(manifest);
   return { root, backupDir, manifestPath, manifest };
+}
+
+export async function readClaudeSessionDeletionBackupContent(claudeHome, options = {}) {
+  const backup = await readBackup(claudeHome, options.backupId, options);
+  const sessionId = String(options.sessionId || '').trim();
+  const session = backup.manifest.sessions.find((item) => item.id === sessionId);
+  if (!session) {
+    throw new CleanerError('CLAUDE_BACKUP_SESSION_NOT_FOUND', 'The selected Claude session is not present in this backup.', 404, { sessionId });
+  }
+  const main = session.artifacts.find((artifact) => artifact.kind === 'main_jsonl');
+  if (!main) throw new CleanerError('INVALID_CLAUDE_BACKUP', 'Claude backup does not contain its main JSONL file.', 422);
+  const backupPath = requireInside(backup.backupDir, path.join(backup.backupDir, main.backupRelativePath), 'Claude backup payload');
+  const saved = await walkArtifact(backupPath);
+  if (!saved.exists || saved.fingerprint !== main.fingerprint) {
+    throw new CleanerError('CLAUDE_BACKUP_DAMAGED', 'The Claude main-session backup is missing or damaged.', 422, { sessionId });
+  }
+  const targetPath = requireInside(claudeHome, path.join(claudeHome, main.sourceRelativePath), 'Claude restore target');
+  const current = await walkArtifact(targetPath);
+  const comparison = !current.exists
+    ? { state: 'missing', label: '当前正文缺失，可从此备份恢复', currentExists: false }
+    : (current.fingerprint === main.fingerprint
+      ? { state: 'identical', label: '当前正文与备份一致', currentExists: true }
+      : { state: 'different', label: '当前正文与备份不同，恢复会拒绝覆盖', currentExists: true });
+  const source = await readFile(backupPath, 'utf8');
+  return {
+    backupId: options.backupId,
+    createdAt: backup.manifest.createdAt || null,
+    session: { id: session.id, title: session.title, projectPath: session.projectPath },
+    contentAvailable: true,
+    comparison,
+    content: buildClaudeCompactConversationPreview(source, backupPath, options),
+  };
 }
 
 export async function listClaudeSessionDeletionBackups(claudeHome, options = {}) {
