@@ -1040,37 +1040,47 @@ async function runHealthAction(actionId) {
 }
 
 function renderTurns(turns) {
-  $('turnCount').textContent = `${turns.length} 轮`;
-  if (!turns.length) {
+  const historyErrors = state.historyErrors || [];
+  $('turnCount').textContent = `${turns.length} 轮${historyErrors.length ? ` · ${historyErrors.length} 条分页失败` : ''}`;
+  if (!turns.length && !historyErrors.length) {
     $('turns').className = 'turns-empty';
     $('turns').textContent = '没有识别到轮次边界。';
     return;
   }
 
   $('turns').className = 'turn-table';
-  const historyNotice = (state.historyErrors || []).length ? `
-    <div class="turn-history-warning">
-      <strong>分页历史中存在未匹配的失败轮次</strong>
-      ${(state.historyErrors || []).map((item) => `
-        <div class="history-error-row">
-          <span><code>${escapeHtml(item.turnId || '')}</code>：${escapeHtml(item.error?.message || 'Codex 记录为失败')}</span>
-          <button type="button" class="btn btn-sm danger-outline" data-delete-history-error="${escapeHtml(item.turnId || '')}">删除失败轮次</button>
-        </div>
-      `).join('')}
+  const sortedErrors = [...historyErrors].sort((left, right) => Number(left.rolloutOrdinal ?? Infinity) - Number(right.rolloutOrdinal ?? Infinity));
+  const errorRows = sortedErrors.map((item) => `
+    <div class="history-error-row" data-history-error-row="${escapeHtml(item.turnId || '')}">
+      <span class="history-error-index">分页历史</span>
+      <span class="history-error-time">rollout #${escapeHtml(String(item.rolloutOrdinal ?? '?'))}</span>
+      <span class="history-error-detail"><strong>失败（仅来自 Codex 分页历史）</strong><code>${escapeHtml(item.turnId || '')}</code><span>${escapeHtml(item.error?.message || 'Codex 记录为失败')}</span></span>
+      <button type="button" class="btn btn-sm danger-outline" data-delete-history-error="${escapeHtml(item.turnId || '')}">删除</button>
     </div>
-  ` : '';
-  $('turns').innerHTML = historyNotice + `
-    <div class="turn-header">
-      <span>#</span><span>时间</span><span>行号</span><span>摘要</span>
-    </div>
-    ${turns.map((turn) => `
+  `);
+  const rows = [];
+  let errorIndex = 0;
+  for (const turn of turns) {
+    while (errorIndex < sortedErrors.length
+      && turn.historyRolloutOrdinal != null
+      && Number(sortedErrors[errorIndex].rolloutOrdinal ?? Infinity) < Number(turn.historyRolloutOrdinal)) {
+      rows.push(errorRows[errorIndex++]);
+    }
+    rows.push(`
       <button class="turn-row${state.selectedTurn?.index === turn.index ? ' selected' : ''}${turn.status === 'failed' ? ' has-error' : ''}${turn.status === 'aborted' ? ' is-aborted' : ''}" type="button" data-turn-index="${turn.index}">
         <span>${turn.index + 1}</span>
         <span>${escapeHtml(formatDate(turn.timestamp))}</span>
         <span>${turn.startLine}-${turn.endLine}</span>
         <span>${turn.status === 'failed' ? '<strong class="turn-status-error">错误</strong> ' : (turn.status === 'aborted' ? '<strong class="turn-status-aborted">中止</strong> ' : '')}${escapeHtml(turn.summary || turn.turnId || '(无用户文本)')}</span>
       </button>
-    `).join('')}
+    `);
+  }
+  while (errorIndex < errorRows.length) rows.push(errorRows[errorIndex++]);
+  $('turns').innerHTML = `
+    <div class="turn-header">
+      <span>#</span><span>时间</span><span>行号</span><span>摘要</span>
+    </div>
+    ${rows.join('')}
   `;
 }
 

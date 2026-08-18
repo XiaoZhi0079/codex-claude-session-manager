@@ -640,16 +640,40 @@ button:disabled {
 }
 
 .history-error-row {
-  align-items: flex-start;
-  display: flex;
-  gap: 10px;
-  justify-content: space-between;
-  margin-top: 8px;
+  align-items: center;
+  background: color-mix(in srgb, #b4232f 8%, transparent);
+  border: 1px solid color-mix(in srgb, #b4232f 28%, transparent);
+  border-radius: 6px;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 1fr 1fr minmax(0, 4fr) auto;
+  margin: 4px 0;
+  min-height: 38px;
+  padding: 5px 8px;
 }
 
-.history-error-row span {
+.history-error-row span,
+.history-error-detail {
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.history-error-index,
+.history-error-time {
+  color: #8c2631;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.history-error-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.history-error-detail code {
+  color: #8c2631;
+  font-size: 10px;
 }
 
 .history-error-row button {
