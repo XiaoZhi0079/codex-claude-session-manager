@@ -41,6 +41,20 @@ test('operation history marks unfinished work from a previous service instance a
   assert.equal(listed.summary.interrupted, 1);
 });
 
+test('history error deletions remain individually restorable after newer operations', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codex-operation-history-'));
+  const history = createOperationHistory({ backupRoot: root, instanceId: 'instance-a' });
+  const deletion = await history.start({ kind: 'history_error_delete', label: '删除孤立分页历史失败轮次' });
+  await history.complete(deletion, { undo: { type: 'history_turn_restore', manifestPath: 'removed-turn.json' } });
+  const newer = await history.start({ kind: 'cleanup', label: '更新的操作' });
+  await history.complete(newer);
+
+  const listed = await history.list();
+  const operation = listed.operations.find((item) => item.id === deletion);
+  assert.equal(operation.canUndo, false);
+  assert.equal(operation.canRestore, true);
+});
+
 test('operation history records failure, undo completion and tolerates a damaged trailing line', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'codex-operation-history-'));
   const history = createOperationHistory({ backupRoot: root, instanceId: 'instance-a' });

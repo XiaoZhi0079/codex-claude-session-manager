@@ -418,6 +418,29 @@ export function createCleanerServer(options = {}) {
         return;
       }
 
+      if (requestUrl.pathname === '/api/operation-history/restore-history-error' && request.method === 'POST') {
+        const body = await readJsonRequest(request);
+        if (body.confirmation !== 'RESTORE') {
+          throw new CleanerError('RESTORE_CONFIRMATION_REQUIRED', 'Type RESTORE to restore this failed history turn.', 400);
+        }
+        const history = await operationHistory.list({ limit: 500 });
+        const original = history.operations.find((operation) => operation.id === body.operationId);
+        if (!original || !original.canRestore || !original.undo) {
+          throw new CleanerError('HISTORY_ERROR_RESTORE_NOT_AVAILABLE', 'This history failure deletion is not available for restore.', 409);
+        }
+        const result = await executeRecordedOperation({
+          kind: 'history_error_restore',
+          label: '恢复分页历史失败轮次',
+          sessionIds: original.sessionIds,
+          details: { originalOperationId: original.id },
+        }, () => executeUndo(original.undo), (value) => ({
+          result: { turnId: value.turnId, restoredTurns: value.turnRows, restoredItems: value.itemRows },
+        }));
+        await operationHistory.markUndone(original.id, result.operationId);
+        sendJson(response, 200, result);
+        return;
+      }
+
       if (requestUrl.pathname === '/api/sessions' && request.method === 'GET') {
         const registry = await loadRegistry({ refresh: true });
         const sessions = registry.sessions;

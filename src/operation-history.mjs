@@ -180,6 +180,9 @@ export function createOperationHistory(options = {}) {
       ...operation,
       isLatest: index === 0,
       canUndo: index === 0 && operation.status === 'completed' && Boolean(operation.undo),
+      canRestore: operation.kind === 'history_error_delete'
+        && operation.status === 'completed'
+        && operation.undo?.type === 'history_turn_restore',
     }));
     return {
       filePath,

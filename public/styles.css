@@ -680,6 +680,22 @@ button:disabled {
   flex: 0 0 auto;
 }
 
+.history-error-undo-banner {
+  align-items: center;
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-radius: 6px;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  padding: 8px 10px;
+}
+
+.history-error-undo-banner code {
+  font-size: 10px;
+}
+
 .message-head,
 .change-head {
   align-items: center;

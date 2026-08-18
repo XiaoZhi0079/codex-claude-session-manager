@@ -48,6 +48,7 @@ const state = {
   backupInventorySignature: null,
   backupRestoreDetectionSignature: null,
   operationHistory: null,
+  lastHistoryErrorDeletion: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -467,6 +468,8 @@ function operationResultText(operation) {
   if (operation.status === 'running') return '操作仍在当前服务实例中执行。';
   if (operation.status === 'undone') return `已由操作 ${String(operation.undoOperationId || '').slice(0, 8)} 撤销。`;
   const result = operation.result || {};
+  if (operation.kind === 'history_error_delete') return `已删除分页历史失败轮次 ${result.turnId || ''}；可单独恢复，不受后续操作影响。`;
+  if (operation.kind === 'history_error_restore') return `已恢复分页历史失败轮次 ${result.turnId || ''}。`;
   if (result.claudeRestartRecommended || result.claudeRefreshRecommended) return 'Claude 会话数据已写入；需要退出或重新打开 Claude Code 才能看到最终状态。';
   if (result.restartRequired || result.codexRefreshRecommended) return '数据已写入；重新打开相关目标会话时 Codex 会读取最终状态，其他窗口无需退出。';
   if (result.count !== undefined) return `处理 ${result.count} 项。`;
@@ -496,9 +499,11 @@ function renderOperationHistory() {
           <strong>${escapeHtml(operation.label || operation.kind)}</strong>
           <span class="operation-status ${statusClass}">${escapeHtml(statusLabel)}</span>
           ${operation.canUndo ? '<span class="operation-reversible">可撤销</span>' : ''}
+          ${operation.canRestore ? '<span class="operation-reversible">可单独恢复</span>' : ''}
         </div>
         <div class="operation-history-meta">${escapeHtml(formatDate(operation.startedAt))} · ${escapeHtml(sessionText)}</div>
         <p>${escapeHtml(operationResultText(operation))}</p>
+        ${operation.canRestore ? `<button type="button" class="btn btn-sm outline-accent" data-restore-history-operation="${escapeHtml(operation.id)}">恢复这条失败轮次</button>` : ''}
       </article>`;
   }).join('') : '<div class="list-status">还没有写操作记录。预览、扫描和刷新不会记入这里。</div>';
 
@@ -511,6 +516,19 @@ function renderOperationHistory() {
     $('operationUndoTitle').textContent = `撤销最近操作：${latest.label}`;
     $('operationUndoDescription').textContent = '只撤销当前列表中的最新写操作；工具会再次校验文件哈希和数据库状态，发生冲突时不会覆盖。';
   }
+}
+
+async function restoreHistoryErrorOperation(operationId) {
+  if (!operationId || !window.confirm('恢复这次删除的分页历史失败轮次？只恢复该轮次及其关联分页项目。')) return;
+  const result = await api('/api/operation-history/restore-history-error', {
+    method: 'POST',
+    body: JSON.stringify({ operationId, confirmation: 'RESTORE' }),
+  });
+  state.lastHistoryErrorDeletion = null;
+  state.operationHistory = await api('/api/operation-history?limit=100');
+  if ($('operationHistoryDialog').open) renderOperationHistory();
+  if (state.selectedSession) await loadTurns();
+  setAlert(`已恢复分页历史失败轮次 ${result.turnId || ''}。`, 'success');
 }
 
 async function openOperationHistory() {
@@ -1076,7 +1094,13 @@ function renderTurns(turns) {
     `);
   }
   while (errorIndex < errorRows.length) rows.push(errorRows[errorIndex++]);
-  $('turns').innerHTML = `
+  const undoBanner = state.lastHistoryErrorDeletion ? `
+    <div class="history-error-undo-banner">
+      <span>刚刚删除了分页历史失败轮次 <code>${escapeHtml(state.lastHistoryErrorDeletion.turnId)}</code></span>
+      <button type="button" class="btn btn-sm outline-accent" data-restore-history-operation="${escapeHtml(state.lastHistoryErrorDeletion.operationId)}">立即恢复</button>
+    </div>
+  ` : '';
+  $('turns').innerHTML = undoBanner + `
     <div class="turn-header">
       <span>#</span><span>时间</span><span>行号</span><span>摘要</span>
     </div>
@@ -1092,8 +1116,9 @@ async function deleteHistoryErrorTurn(turnId) {
     method: 'POST',
     body: JSON.stringify({ confirmation: 'DELETE' }),
   });
+  state.lastHistoryErrorDeletion = { operationId: body.operationId, turnId };
   await loadTurns();
-  setAlert(`已删除孤立失败轮次 ${body.turnId || turnId}；SQLite 已备份，可从操作历史撤销。`, 'success');
+  setAlert(`已删除孤立失败轮次 ${body.turnId || turnId}；轮次列表顶部可立即恢复，操作历史中也有独立恢复按钮。`, 'success');
 }
 
 function renderCleanupPreview(body) {
@@ -2750,6 +2775,10 @@ $('backupAutoDetectEnabled').addEventListener('change', () => {
 $('detectBackupChangesButton').addEventListener('click', () => detectBackupChanges({ manual: true }));
 $('operationHistoryButton').addEventListener('click', () => openOperationHistory().catch((error) => setAlert(error.message)));
 $('closeOperationHistoryButton').addEventListener('click', closeOperationHistory);
+$('operationHistoryList').addEventListener('click', (event) => {
+  const button = event.target.closest('[data-restore-history-operation]');
+  if (button) restoreHistoryErrorOperation(button.dataset.restoreHistoryOperation).catch((error) => setAlert(error.message));
+});
 $('operationUndoConfirmation').addEventListener('input', () => {
   $('undoLatestOperationButton').disabled = !(
     state.operationHistory?.latest?.canUndo
@@ -2892,6 +2921,11 @@ $('sessions').addEventListener('change', (event) => {
   updateBatchControls();
 });
 $('turns').addEventListener('click', (event) => {
+  const historyRestore = event.target.closest('[data-restore-history-operation]');
+  if (historyRestore) {
+    restoreHistoryErrorOperation(historyRestore.dataset.restoreHistoryOperation).catch((error) => setAlert(error.message));
+    return;
+  }
   const historyDelete = event.target.closest('[data-delete-history-error]');
   if (historyDelete) {
     deleteHistoryErrorTurn(historyDelete.dataset.deleteHistoryError).catch((error) => setAlert(error.message));
