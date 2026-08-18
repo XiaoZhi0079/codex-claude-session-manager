@@ -301,6 +301,30 @@ export function listTurnsFromRecords(records) {
   });
 }
 
+export function mergeThreadHistoryTurnRows(turns, historyRows = []) {
+  const byTurnId = new Map(historyRows.filter((row) => row?.turnId).map((row) => [row.turnId, row]));
+  const matched = new Set();
+  const merged = turns.map((turn) => {
+    const row = byTurnId.get(turn.turnId);
+    if (!row) return turn;
+    matched.add(row.turnId);
+    const errorMessage = row.error?.message || null;
+    return {
+      ...turn,
+      status: row.status === 'failed' || errorMessage ? 'failed' : (row.status === 'aborted' ? 'aborted' : turn.status),
+      error: errorMessage ? { message: errorMessage, info: row.error.codexErrorInfo ?? row.error.codex_error_info ?? null } : turn.error,
+      historyStatus: row.status,
+      historyRolloutOrdinal: row.rolloutOrdinal,
+    };
+  });
+  return {
+    turns: merged,
+    unmatchedErrors: historyRows.filter((row) => (
+      !matched.has(row.turnId) && (row.status === 'failed' || row.error?.message)
+    )),
+  };
+}
+
 function findTurn(records, selector) {
   const turns = listTurnsFromRecords(records);
   let turn = null;

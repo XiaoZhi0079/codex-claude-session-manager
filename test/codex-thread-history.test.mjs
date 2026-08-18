@@ -11,6 +11,7 @@ import {
   invalidateThreadHistory,
   prepareThreadHistoryMutation,
   readThreadHistoryState,
+  readThreadHistoryTurnRows,
   resolveThreadHistoryDbPath,
   withTargetSessionLocks,
 } from '../src/codex-thread-history.mjs';
@@ -108,6 +109,19 @@ test('target invalidation preserves every other session and creates a valid back
   assert.equal(other.projection.next_rollout_ordinal, 4);
   assert.equal(other.turnRows, 1);
   assert.equal(other.itemRows, 2);
+});
+
+test('reads failed turn status and error_json from paginated history', async () => {
+  const data = await historyFixture();
+  const db = new DatabaseSync(path.join(data.codexHome, 'thread_history_1.sqlite'));
+  db.exec('ALTER TABLE thread_turns ADD COLUMN rollout_ordinal INTEGER; ALTER TABLE thread_turns ADD COLUMN status TEXT; ALTER TABLE thread_turns ADD COLUMN error_json TEXT; ALTER TABLE thread_turns ADD COLUMN started_at INTEGER; ALTER TABLE thread_turns ADD COLUMN completed_at INTEGER;');
+  db.prepare('INSERT INTO thread_turns (thread_id, turn_id, rollout_ordinal, status, error_json) VALUES (?, ?, ?, ?, ?)')
+    .run(TARGET_ID, 'history-error-turn', 99, 'failed', JSON.stringify({ message: 'upstream bad request', codexErrorInfo: 'other' }));
+  db.close();
+  const result = await readThreadHistoryTurnRows(data.codexHome, [TARGET_ID]);
+  const row = result.rows.find((item) => item.turnId === 'history-error-turn');
+  assert.equal(row.status, 'failed');
+  assert.equal(row.error.message, 'upstream bad request');
 });
 
 test('database backup helper safely snapshots the current thread history', async () => {

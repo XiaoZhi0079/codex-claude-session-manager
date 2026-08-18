@@ -145,6 +145,7 @@ async function setPlatform(platform) {
   state.sessions = [];
   state.directories = [];
   state.turns = [];
+  state.historyErrors = [];
   state.selectedDirectory = '*';
   state.selectedSession = null;
   state.selectedTurn = null;
@@ -1047,7 +1048,13 @@ function renderTurns(turns) {
   }
 
   $('turns').className = 'turn-table';
-  $('turns').innerHTML = `
+  const historyNotice = (state.historyErrors || []).length ? `
+    <div class="turn-history-warning">
+      <strong>分页历史中存在未匹配的失败轮次</strong>
+      ${(state.historyErrors || []).map((item) => `<div><code>${escapeHtml(item.turnId || '')}</code>：${escapeHtml(item.error?.message || 'Codex 记录为失败')}</div>`).join('')}
+    </div>
+  ` : '';
+  $('turns').innerHTML = historyNotice + `
     <div class="turn-header">
       <span>#</span><span>时间</span><span>行号</span><span>摘要</span>
     </div>
@@ -1532,6 +1539,7 @@ async function loadTurns() {
   const prefix = isClaudePlatform() ? '/api/claude-code/sessions' : '/api/sessions';
   const body = await api(`${prefix}/${encodeURIComponent(state.selectedSession.id)}/turns`);
   state.turns = body.turns;
+  state.historyErrors = body.historyErrors || [];
   renderTurns(body.turns);
   syncFullContextTurnJump();
 }

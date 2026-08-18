@@ -625,6 +625,20 @@ button:disabled {
   word-break: break-word;
 }
 
+.turn-history-warning {
+  background: #fff7e6;
+  border: 1px solid #e3b45c;
+  border-radius: 6px;
+  color: #754d0d;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+}
+
+.turn-history-warning code {
+  color: inherit;
+  font-size: 11px;
+}
+
 .message-head,
 .change-head {
   align-items: center;

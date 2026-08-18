@@ -9,6 +9,7 @@ import {
   buildCompactConversationPreview,
   buildFullContextDetail,
   buildTurnMessageDetail,
+  mergeThreadHistoryTurnRows,
   CLEANUP_MODES,
   cleanRecords,
   hashRolloutSource,
@@ -213,6 +214,17 @@ test('Codex task errors and aborted turns are visible in compact turn details', 
   const context = buildFullContextDetail(records, { turnId: 'turn-error' }, { offset: 0, limit: 20 });
   assert.equal(context.records.at(-1).label, 'Codex 错误');
   assert.equal(context.records.at(-1).text, 'stream disconnected before completion');
+});
+
+test('thread history failures merge by turn id and preserve unmatched diagnostics', () => {
+  const turns = [{ index: 0, turnId: 'turn-1', status: 'aborted' }];
+  const result = mergeThreadHistoryTurnRows(turns, [
+    { turnId: 'turn-1', status: 'failed', error: { message: 'upstream 400' } },
+    { turnId: 'stale-turn', status: 'failed', error: { message: 'stale projection error' } },
+  ]);
+  assert.equal(result.turns[0].status, 'failed');
+  assert.equal(result.turns[0].error.message, 'upstream 400');
+  assert.equal(result.unmatchedErrors[0].turnId, 'stale-turn');
 });
 
 test('cleanup requires the preview hash and preserves untouched raw lines', async () => {

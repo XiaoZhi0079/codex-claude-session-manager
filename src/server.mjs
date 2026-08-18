@@ -11,6 +11,7 @@ import {
   getDefaultCodexHome,
   getSession,
   listTurnsFromRecords,
+  mergeThreadHistoryTurnRows,
   previewCleanup,
   previewMessageEdits,
   readRollout,
@@ -48,7 +49,7 @@ import {
 } from './operation-backup.mjs';
 import { diagnoseSessionHealth } from './session-health.mjs';
 import { createOperationHistory } from './operation-history.mjs';
-import { inspectTargetSessionLocks } from './codex-thread-history.mjs';
+import { inspectTargetSessionLocks, readThreadHistoryTurnRows } from './codex-thread-history.mjs';
 import {
   buildClaudeSessionRegistry,
   getDefaultClaudeHome,
@@ -985,9 +986,13 @@ export function createCleanerServer(options = {}) {
           throw new CleanerError('ROLLOUT_NOT_FOUND', 'No rollout JSONL was found for this session.', 404);
         }
         const records = await readRollout(session.rolloutPath);
+        const history = await readThreadHistoryTurnRows(codexHome, [session.id]);
+        const merged = mergeThreadHistoryTurnRows(listTurnsFromRecords(records), history.rows);
         sendJson(response, 200, {
           session,
-          turns: listTurnsFromRecords(records),
+          turns: merged.turns,
+          historyErrors: merged.unmatchedErrors,
+          threadHistory: { available: history.available, dbPath: history.dbPath, rowCount: history.rows.length },
           recordCount: records.length,
         });
         return;

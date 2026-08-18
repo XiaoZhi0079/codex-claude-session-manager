@@ -416,3 +416,42 @@ export async function readThreadHistoryState(codexHome, sessionIds, options = {}
     db.close();
   }
 }
+
+export async function readThreadHistoryTurnRows(codexHome, sessionIds, options = {}) {
+  const ids = uniqueSessionIds(sessionIds);
+  const dbPath = await resolveThreadHistoryDbPath(codexHome, options);
+  if (!ids.length || !dbPath || !await pathExists(dbPath)) return { available: false, dbPath, rows: [] };
+  const sqlite = await loadSqlite();
+  const db = new sqlite.DatabaseSync(dbPath, { readOnly: true });
+  try {
+    db.exec('PRAGMA busy_timeout=5000');
+    if (!tableExists(db, 'thread_turns')) return { available: false, dbPath, rows: [], reason: 'unsupported_schema' };
+    const query = db.prepare(`
+      SELECT thread_id, turn_id, rollout_ordinal, status, error_json, started_at, completed_at
+      FROM thread_turns
+      WHERE thread_id = ?
+      ORDER BY rollout_ordinal ASC
+    `);
+    const rows = [];
+    for (const sessionId of ids) {
+      for (const row of query.all(sessionId)) {
+        let error = null;
+        if (typeof row.error_json === 'string' && row.error_json.trim()) {
+          try { error = JSON.parse(row.error_json); } catch { error = { message: row.error_json }; }
+        }
+        rows.push({
+          sessionId: row.thread_id,
+          turnId: row.turn_id,
+          rolloutOrdinal: row.rollout_ordinal,
+          status: row.status,
+          error,
+          startedAt: row.started_at,
+          completedAt: row.completed_at,
+        });
+      }
+    }
+    return { available: true, dbPath, rows };
+  } finally {
+    db.close();
+  }
+}
