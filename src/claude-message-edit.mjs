@@ -93,9 +93,13 @@ export async function restoreClaudeMessageEdit(claudeHome, options = {}) {
   const root = editRoot(claudeHome, options);
   if (!backupDir.startsWith(`${root}${path.sep}`)) throw new CleanerError('UNSAFE_CLAUDE_EDIT_RESTORE', 'The Claude edit backup is outside the managed backup root.', 422);
   const manifest = JSON.parse(await readFile(path.join(backupDir, 'manifest.json'), 'utf8'));
-  const target = path.join(claudeHome, manifest.sourceRelativePath);
+  const target = path.resolve(claudeHome, manifest.sourceRelativePath);
+  const payload = path.resolve(backupDir, 'payload', manifest.sourceRelativePath);
+  if (!target.startsWith(`${path.resolve(claudeHome)}${path.sep}`) || !payload.startsWith(`${backupDir}${path.sep}`)) {
+    throw new CleanerError('UNSAFE_CLAUDE_EDIT_RESTORE', 'The Claude edit backup manifest contains an unsafe path.', 422);
+  }
   const current = await readFile(target, 'utf8');
   if (options.expectedCurrentHash && hashRolloutSource(current) !== options.expectedCurrentHash) throw new CleanerError('CLAUDE_EDIT_RESTORE_STALE', 'The Claude session changed after editing. Reload before restoring.', 409);
-  await copyFile(path.join(backupDir, 'payload', manifest.sourceRelativePath), target);
+  await copyFile(payload, target);
   return { restored: target, claudeRestartRecommended: true };
 }
