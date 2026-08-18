@@ -347,6 +347,7 @@ dialog::backdrop { background: color-mix(in oklab, var(--bg) 55%, transparent); 
 .backup-content-state { background: var(--surface-2); color: var(--muted); }
 .backup-content-message { border-color: var(--border); }
 .backup-content-message.role-assistant { background: var(--surface-2); }
+.backup-content-message.role-error { background: color-mix(in srgb, var(--danger) 9%, var(--surface)); }
 .backup-content-message strong, .backup-content-message pre { color: var(--fg); }
 .backup-session-title-button { color: var(--fg); }
 .backup-session-title-button:hover { color: var(--accent-ink); }

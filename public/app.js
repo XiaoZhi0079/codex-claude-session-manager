@@ -1052,11 +1052,11 @@ function renderTurns(turns) {
       <span>#</span><span>时间</span><span>行号</span><span>摘要</span>
     </div>
     ${turns.map((turn) => `
-      <button class="turn-row${state.selectedTurn?.index === turn.index ? ' selected' : ''}" type="button" data-turn-index="${turn.index}">
+      <button class="turn-row${state.selectedTurn?.index === turn.index ? ' selected' : ''}${turn.status === 'failed' ? ' has-error' : ''}${turn.status === 'aborted' ? ' is-aborted' : ''}" type="button" data-turn-index="${turn.index}">
         <span>${turn.index + 1}</span>
         <span>${escapeHtml(formatDate(turn.timestamp))}</span>
         <span>${turn.startLine}-${turn.endLine}</span>
-        <span>${escapeHtml(turn.summary || turn.turnId || '(无用户文本)')}</span>
+        <span>${turn.status === 'failed' ? '<strong class="turn-status-error">错误</strong> ' : (turn.status === 'aborted' ? '<strong class="turn-status-aborted">中止</strong> ' : '')}${escapeHtml(turn.summary || turn.turnId || '(无用户文本)')}</span>
       </button>
     `).join('')}
   `;
@@ -1108,6 +1108,7 @@ function renderCleanupPreview(body) {
 
 function messageRoleLabel(message) {
   if (message.role === 'user') return '你';
+  if (message.role === 'error') return message.phase === 'turn_aborted' ? 'Codex · 任务中止' : 'Codex · 错误';
   if (isClaudePlatform()) {
     if (message.phase === 'commentary') return 'Claude · 过程回复';
     if (message.phase === 'subagent') return 'Claude · 子代理';
@@ -1145,7 +1146,9 @@ function renderMessages() {
         <strong>${escapeHtml(messageRoleLabel(message))}</strong>
         <span>第 ${message.lineNumber} 行</span>
       </header>
-      ${message.parts.map((part) => `
+      ${message.parts.map((part) => message.editable === false ? `
+        <div class="message-part runtime-error-message"><pre>${escapeHtml(part.text)}</pre></div>
+      ` : `
         <div class="message-part">
           <textarea data-message-target="${part.targetId}" readonly spellcheck="false">${escapeHtml(state.edits.get(part.targetId)?.newText ?? part.text)}</textarea>
           ${isClaudePlatform() ? '' : `<div class="message-actions">
@@ -1155,7 +1158,7 @@ function renderMessages() {
       `).join('')}
     </article>
   `).join('');
-  $('editActions').classList.toggle('hidden', isClaudePlatform());
+  $('editActions').classList.toggle('hidden', isClaudePlatform() || !messages.some((message) => message.editable !== false));
   $('messageList').querySelectorAll('textarea[data-message-target]').forEach(resizeMessageEditor);
   if (!isClaudePlatform()) updateEditControls();
 }
@@ -2365,6 +2368,7 @@ function backupContentEndpoint() {
 
 function backupMessageRoleLabel(message) {
   if (message.role === 'user') return '你';
+  if (message.role === 'error') return message.phase === 'turn_aborted' ? 'Codex · 任务中止' : 'Codex · 错误';
   return state.restoreBackupKind === 'claude-deletion' ? 'Claude' : 'Codex';
 }
 

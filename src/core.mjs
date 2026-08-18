@@ -163,6 +163,56 @@ function getUserSummary(records) {
   return '';
 }
 
+function runtimeEventMessage(record, recordIndex = null) {
+  const data = record?.data || record;
+  if (data?.type !== 'event_msg') return null;
+  const payload = data.payload || {};
+  if (payload.type === 'task_complete' && payload.error) {
+    const text = typeof payload.error === 'string'
+      ? payload.error
+      : (typeof payload.error.message === 'string' ? payload.error.message : 'Codex task failed.');
+    return {
+      messageId: recordIndex === null ? null : `runtime:${recordIndex}`,
+      recordIndex,
+      lineNumber: record?.lineNumber || null,
+      role: 'error',
+      phase: 'task_error',
+      text,
+      errorInfo: payload.error?.codex_error_info ?? null,
+      editable: false,
+      parts: [{ targetId: null, contentIndex: null, type: 'error_text', text }],
+    };
+  }
+  if (payload.type === 'turn_aborted' && payload.reason) {
+    const text = typeof payload.reason === 'string'
+      ? payload.reason
+      : JSON.stringify(payload.reason, null, 2);
+    return {
+      messageId: recordIndex === null ? null : `runtime:${recordIndex}`,
+      recordIndex,
+      lineNumber: record?.lineNumber || null,
+      role: 'error',
+      phase: 'turn_aborted',
+      text,
+      errorInfo: null,
+      editable: false,
+      parts: [{ targetId: null, contentIndex: null, type: 'error_text', text }],
+    };
+  }
+  return null;
+}
+
+function turnRuntimeStatus(records) {
+  const events = records.map((record) => runtimeEventMessage(record)).filter(Boolean);
+  const failure = events.find((event) => event.phase === 'task_error');
+  const aborted = events.find((event) => event.phase === 'turn_aborted');
+  return {
+    status: failure ? 'failed' : (aborted ? 'aborted' : 'completed'),
+    error: failure ? { message: failure.text, info: failure.errorInfo } : null,
+    abortReason: aborted?.text || null,
+  };
+}
+
 export function listTurnsFromRecords(records) {
   const modernStarts = [];
   records.forEach((record, index) => {
@@ -188,6 +238,7 @@ export function listTurnsFromRecords(records) {
       }
 
       const slice = records.slice(startIndex, endIndex + 1);
+      const runtimeStatus = turnRuntimeStatus(slice);
       const turnId = startTurnId
         || slice.map((record) => getRecordTurnId(record.data)).find(Boolean)
         || null;
@@ -203,6 +254,7 @@ export function listTurnsFromRecords(records) {
         recordCount: endIndex - startIndex + 1,
         timestamp: getRecordTimestamp(records[startIndex].data),
         summary: getUserSummary(slice),
+        ...runtimeStatus,
       };
     });
   }
@@ -228,6 +280,7 @@ export function listTurnsFromRecords(records) {
   return starts.map((startIndex, ordinal) => {
     const endIndex = ordinal + 1 < starts.length ? starts[ordinal + 1] - 1 : records.length - 1;
     const slice = records.slice(startIndex, endIndex + 1);
+    const runtimeStatus = turnRuntimeStatus(slice);
     const turnId = slice.map((record) => getRecordTurnId(record.data)).find(Boolean) || null;
     return {
       index: ordinal,
@@ -243,6 +296,7 @@ export function listTurnsFromRecords(records) {
       recordCount: endIndex - startIndex + 1,
       timestamp: getRecordTimestamp(records[startIndex].data),
       summary: getUserSummary(slice),
+      ...runtimeStatus,
     };
   });
 }
@@ -314,6 +368,16 @@ function contextRecordText(data, location) {
   if (type === 'reasoning') {
     return flattenText(data?.payload?.summary ?? data?.summary).join('\n\n');
   }
+  if (type === 'task_complete' && data?.payload?.error) {
+    return typeof data.payload.error === 'string'
+      ? data.payload.error
+      : (data.payload.error.message || JSON.stringify(data.payload.error, null, 2));
+  }
+  if (type === 'turn_aborted' && data?.payload?.reason) {
+    return typeof data.payload.reason === 'string'
+      ? data.payload.reason
+      : JSON.stringify(data.payload.reason, null, 2);
+  }
   return '';
 }
 
@@ -329,7 +393,8 @@ function contextRecordLabel(data, location, typeOverride = null) {
     turn_context: '本轮运行上下文',
     world_state: '工作区状态',
     task_started: '任务开始',
-    task_complete: '任务结束',
+    task_complete: data?.payload?.error ? 'Codex 错误' : '任务结束',
+    turn_aborted: '任务已中止',
     thread_settings_applied: '线程设置更新',
     reasoning: '推理记录',
     function_call: '工具调用',
@@ -426,6 +491,11 @@ function collectTurnMessages(records, selector) {
 
   for (let recordIndex = turn.startIndex; recordIndex <= turn.endIndex; recordIndex += 1) {
     const record = records[recordIndex];
+    const runtimeMessage = runtimeEventMessage(record, recordIndex);
+    if (runtimeMessage) {
+      messages.push(runtimeMessage);
+      continue;
+    }
     const location = getMessageLocation(record.data);
     if (!location) continue;
 
@@ -472,6 +542,7 @@ function collectTurnMessages(records, selector) {
       phase,
       text,
       parts,
+      editable: true,
     });
   }
 
@@ -502,6 +573,23 @@ export function buildCompactConversationPreview(records, rawOptions = {}) {
     const turn = turns[turnCursor];
     if (!turn || recordIndex < turn.startIndex || recordIndex > turn.endIndex) continue;
     const record = records[recordIndex];
+    const runtimeMessage = runtimeEventMessage(record, recordIndex);
+    if (runtimeMessage) {
+      const truncated = runtimeMessage.text.length > maxMessageChars;
+      if (truncated) truncatedMessageCount += 1;
+      messages.push({
+        role: runtimeMessage.role,
+        phase: runtimeMessage.phase,
+        errorInfo: runtimeMessage.errorInfo,
+        lineNumber: record.lineNumber,
+        turnIndex: turn.index,
+        text: truncated
+          ? `${runtimeMessage.text.slice(0, maxMessageChars)}\n\n[内容过长，已截断]`
+          : runtimeMessage.text,
+        truncated,
+      });
+      continue;
+    }
     const location = getMessageLocation(record.data);
     if (!location) continue;
     const role = location.container.role;

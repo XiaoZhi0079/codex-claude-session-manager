@@ -14,6 +14,8 @@
 | POST | `/api/full-context` | 完整上下文筛选、分页与定位 |
 | POST | `/api/full-context/export` | 导出 JSONL 或 Markdown |
 
+Codex 轮次的 `status` 可为 `completed`、`failed` 或 `aborted`。`failed` 轮次保留 `task_complete.error.message` 和 `codex_error_info`；精简轮次详情会把错误作为只读 `error` 消息返回，不会将其当作可编辑的助手消息。
+
 ## Claude Code 资源
 
 | 方法 | 路径 | 用途 |

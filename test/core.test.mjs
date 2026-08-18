@@ -6,7 +6,9 @@ import test from 'node:test';
 
 import {
   applyCleanup,
+  buildCompactConversationPreview,
   buildFullContextDetail,
+  buildTurnMessageDetail,
   CLEANUP_MODES,
   cleanRecords,
   hashRolloutSource,
@@ -168,6 +170,49 @@ test('full context includes persisted base instructions and every record through
   assert.equal(detail.records[2].role, 'developer');
   assert.equal(detail.records[2].text, 'developer instructions');
   assert.equal(detail.records.some((record) => record.text === 'future request'), false);
+});
+
+test('Codex task errors and aborted turns are visible in compact turn details', () => {
+  const records = parseJsonl(jsonl([
+    { type: 'session_meta', payload: { id: 'errors' } },
+    { type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-error' } },
+    {
+      type: 'response_item',
+      payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'retry this' }] },
+    },
+    {
+      type: 'event_msg',
+      payload: {
+        type: 'task_complete',
+        turn_id: 'turn-error',
+        error: { message: 'stream disconnected before completion', codex_error_info: 'other' },
+      },
+    },
+    { type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-aborted' } },
+    {
+      type: 'response_item',
+      payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'stop this' }] },
+    },
+    { type: 'event_msg', payload: { type: 'turn_aborted', turn_id: 'turn-aborted', reason: 'interrupted' } },
+  ]));
+
+  const turns = listTurnsFromRecords(records);
+  assert.equal(turns[0].status, 'failed');
+  assert.equal(turns[0].error.message, 'stream disconnected before completion');
+  assert.equal(turns[1].status, 'aborted');
+  assert.equal(turns[1].abortReason, 'interrupted');
+
+  const failedDetail = buildTurnMessageDetail(records, { turnId: 'turn-error' });
+  assert.deepEqual(failedDetail.messages.map((message) => message.role), ['user', 'error']);
+  assert.equal(failedDetail.messages[1].text, 'stream disconnected before completion');
+  assert.equal(failedDetail.messages[1].editable, false);
+
+  const compact = buildCompactConversationPreview(records);
+  assert.deepEqual(compact.messages.map((message) => message.role), ['user', 'error', 'user', 'error']);
+
+  const context = buildFullContextDetail(records, { turnId: 'turn-error' }, { offset: 0, limit: 20 });
+  assert.equal(context.records.at(-1).label, 'Codex 错误');
+  assert.equal(context.records.at(-1).text, 'stream disconnected before completion');
 });
 
 test('cleanup requires the preview hash and preserves untouched raw lines', async () => {

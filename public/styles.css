@@ -367,6 +367,7 @@ h2 {
 
 .backup-content-message:last-child { border-bottom: 0; }
 .backup-content-message.role-assistant { background: #fbfcfe; }
+.backup-content-message.role-error { background: #fff1f1; color: #a91f2c; }
 
 .backup-content-message header {
   align-items: center;
@@ -601,6 +602,27 @@ button:disabled {
 
 .message-block.role-assistant {
   border-left-color: #39825a;
+}
+
+.message-block.role-error {
+  background: #fff7f7;
+  border-left-color: #c63d3d;
+}
+
+.message-block.role-error .message-head strong,
+.turn-status-error {
+  color: #b4232f;
+}
+
+.turn-status-aborted {
+  color: #9a6513;
+}
+
+.runtime-error-message pre {
+  color: #b4232f;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .message-head,
