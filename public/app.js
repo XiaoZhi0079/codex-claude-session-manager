@@ -1222,16 +1222,16 @@ function renderMessages() {
       ` : `
         <div class="message-part">
           <textarea data-message-target="${part.targetId}" readonly spellcheck="false">${escapeHtml(state.edits.get(part.targetId)?.newText ?? part.text)}</textarea>
-          ${isClaudePlatform() ? '' : `<div class="message-actions">
+          ${`<div class="message-actions">
             <button type="button" data-edit-target="${part.targetId}">编辑</button>
           </div>`}
         </div>
       `).join('')}
     </article>
   `).join('');
-  $('editActions').classList.toggle('hidden', isClaudePlatform() || !messages.some((message) => message.editable !== false));
+  $('editActions').classList.toggle('hidden', !messages.some((message) => message.editable !== false));
   $('messageList').querySelectorAll('textarea[data-message-target]').forEach(resizeMessageEditor);
-  if (!isClaudePlatform()) updateEditControls();
+  updateEditControls();
 }
 
 function contextScopeLabel(scope) {
@@ -1537,9 +1537,11 @@ function renderEditPreview(body) {
     </article>
   `).join('');
   $('editPreview').classList.remove('hidden');
-  $('editSessionWarning').textContent = targetActive
-    ? '所选 Codex 会话仍在窗口中打开。请只关闭这个目标会话，然后重新预览；其他 Codex 窗口无需退出。'
-    : '应用后工具会使所选会话的分页历史投影失效；重新打开该会话时 Codex 会从 rollout 重建。其他 Codex 窗口可保持打开。';
+  $('editSessionWarning').textContent = isClaudePlatform()
+    ? '应用后会备份并改写 Claude 主会话 JSONL；如需恢复，可使用本次操作的回退。'
+    : (targetActive
+      ? '所选 Codex 会话仍在窗口中打开。请只关闭这个目标会话，然后重新预览；其他 Codex 窗口无需退出。'
+      : '应用后工具会使所选会话的分页历史投影失效；重新打开该会话时 Codex 会从 rollout 重建。其他 Codex 窗口可保持打开。');
   $('editSessionWarning').className = `mode-warning${targetActive ? ' warning' : ''}`;
   $('editConfirmation').value = '';
   $('applyEditButton').disabled = true;
@@ -1552,7 +1554,7 @@ function renderEditResult() {
   }
   $('editResultText').textContent = JSON.stringify({
     changedMessages: state.lastEdit.changedCount,
-    backupFile: state.lastEdit.backupPath,
+    backupFile: state.lastEdit.backupPath || state.lastEdit.backupDir,
   }, null, 2);
   $('editResult').classList.remove('hidden');
   $('restoreEditButton').disabled = false;
@@ -1615,7 +1617,7 @@ async function selectSession(sessionId) {
   if (isClaudePlatform()) {
     $('deleteSessionButton').disabled = !state.selectedSession;
     $('deleteSessionButton').title = '备份完整会话包后删除该 Claude Code 会话';
-    $('cleanupTabButton').disabled = true;
+    $('cleanupTabButton').disabled = false;
     $('previewSession').textContent = state.selectedSession?.title || sessionId;
     $('turnContext').textContent = state.selectedSession
       ? `← ${state.selectedSession.title || '(无标题会话)'} · ${String(state.selectedSession.id || '').slice(0, 8)}`
@@ -1675,6 +1677,7 @@ async function selectTurn(index, options = {}) {
     state.turnDetail = detailBody;
     state.preview = cleanupBody.preview;
     state.cleanupSourceHash = cleanupBody.sourceHash;
+    state.turnDetail.sourceHash = cleanupBody.sourceHash;
     renderMessages();
     $('compactContextButton').disabled = false;
     $('fullContextButton').disabled = false;
@@ -1734,11 +1737,12 @@ async function refreshCleanupPreview() {
 }
 
 async function previewEdits() {
-  const body = await api('/api/edit-preview', {
+  const body = await api(isClaudePlatform()
+    ? `/api/claude-code/sessions/${encodeURIComponent(state.selectedSession.id)}/turns/${encodeURIComponent(state.selectedTurn.turnId)}/edit-preview`
+    : '/api/edit-preview', {
     method: 'POST',
     body: JSON.stringify({
-      sessionId: state.selectedSession.id,
-      selector: selectorForTurn(state.selectedTurn),
+      ...(isClaudePlatform() ? {} : { sessionId: state.selectedSession.id, selector: selectorForTurn(state.selectedTurn) }),
       sourceHash: state.turnDetail.sourceHash,
       edits: editPayload(),
     }),
@@ -1748,11 +1752,12 @@ async function previewEdits() {
 
 async function applyEdits() {
   const turnIndex = state.selectedTurn.index;
-  const body = await api('/api/edit-apply', {
+  const body = await api(isClaudePlatform()
+    ? `/api/claude-code/sessions/${encodeURIComponent(state.selectedSession.id)}/turns/${encodeURIComponent(state.selectedTurn.turnId)}/edit-apply`
+    : '/api/edit-apply', {
     method: 'POST',
     body: JSON.stringify({
-      sessionId: state.selectedSession.id,
-      selector: selectorForTurn(state.selectedTurn),
+      ...(isClaudePlatform() ? {} : { sessionId: state.selectedSession.id, selector: selectorForTurn(state.selectedTurn) }),
       sourceHash: state.turnDetail.sourceHash,
       edits: editPayload(),
       confirmation: $('editConfirmation').value,
@@ -1760,21 +1765,21 @@ async function applyEdits() {
   });
   state.lastEdit = {
     backupPath: body.backupFile,
+    backupDir: body.backupDir,
     expectedCurrentHash: body.sourceHashAfter,
-    changedCount: body.preview.changedCount,
+    changedCount: body.preview?.changedCount || body.changedCount,
   };
   await loadTurns();
   await selectTurn(turnIndex, { preserveLastEdit: true, operation: 'messages' });
-  setAlert('消息修改完成，原始 rollout 已备份；如存在分页历史，也已保存安全副本。重新打开目标会话时 Codex 会重建历史。', 'success');
+  setAlert(`消息修改完成，原始 ${isClaudePlatform() ? 'Claude 会话文件' : 'rollout'} 已备份；重新打开目标会话时会读取修改后的内容。`, 'success');
 }
 
 async function restoreLastEdit() {
   const turnIndex = state.selectedTurn.index;
-  const body = await api('/api/edit-restore', {
+  const body = await api(isClaudePlatform() ? '/api/claude-code/edit-restore' : '/api/edit-restore', {
     method: 'POST',
     body: JSON.stringify({
-      sessionId: state.selectedSession.id,
-      backupPath: state.lastEdit.backupPath,
+      ...(isClaudePlatform() ? { backupDir: state.lastEdit.backupDir } : { sessionId: state.selectedSession.id, backupPath: state.lastEdit.backupPath }),
       expectedCurrentHash: state.lastEdit.expectedCurrentHash,
       confirmation: 'RESTORE',
     }),
@@ -1782,7 +1787,7 @@ async function restoreLastEdit() {
   state.lastEdit = null;
   await loadTurns();
   await selectTurn(turnIndex, { operation: 'messages' });
-  setAlert(`已撤销本次编辑；恢复前版本保存在 ${body.restorePointFile}。重新打开目标会话时 Codex 会重建历史。`, 'success');
+  setAlert(`已撤销本次编辑。重新打开目标会话时会读取恢复后的 ${isClaudePlatform() ? 'Claude' : 'Codex'} 会话。`, 'success');
 }
 
 async function applyCleanup() {

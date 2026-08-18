@@ -78,6 +78,11 @@ import {
   previewClaudeTurnDeletion,
   restoreClaudeTurnDeleteBackup,
 } from './claude-turn-delete.mjs';
+import {
+  applyClaudeMessageEdits,
+  previewClaudeMessageEdits,
+  restoreClaudeMessageEdit,
+} from './claude-message-edit.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -348,6 +353,13 @@ export function createCleanerServer(options = {}) {
         expectedCurrentHash: undo.expectedCurrentHash,
       });
     }
+    if (undo.type === 'claude_message_edit_restore') {
+      return restoreClaudeMessageEdit(claudeHome, {
+        backupRoot: undo.backupRoot,
+        backupDir: undo.backupDir,
+        expectedCurrentHash: undo.expectedCurrentHash,
+      });
+    }
     throw new CleanerError('UNDO_NOT_SUPPORTED', 'The latest operation does not have a supported restore point.', 409);
   }
 
@@ -590,6 +602,40 @@ export function createCleanerServer(options = {}) {
             expectedCurrentHash: value.sourceHashAfter,
           },
         }));
+        claudeRegistryCache = null;
+        sendJson(response, 200, result);
+        return;
+      }
+
+      const claudeEditPreviewMatch = requestUrl.pathname.match(/^\/api\/claude-code\/sessions\/([^/]+)\/turns\/([^/]+)\/edit-preview$/);
+      if (claudeEditPreviewMatch && request.method === 'POST') {
+        const body = await readJsonRequest(request);
+        const sessionId = decodeURIComponent(claudeEditPreviewMatch[1]);
+        const turnId = decodeURIComponent(claudeEditPreviewMatch[2]);
+        const result = await previewClaudeMessageEdits(claudeHome, sessionId, turnId, body.edits, { backupRoot: claudeTurnBackupRoot });
+        sendJson(response, 200, { preview: result, sourceHash: result.sourceHash, targetSessionLock: await inspectTargetSessionLocks(codexHome, []) });
+        return;
+      }
+
+      const claudeEditApplyMatch = requestUrl.pathname.match(/^\/api\/claude-code\/sessions\/([^/]+)\/turns\/([^/]+)\/edit-apply$/);
+      if (claudeEditApplyMatch && request.method === 'POST') {
+        const body = await readJsonRequest(request);
+        if (body.confirmation !== 'EDIT') throw new CleanerError('CLAUDE_EDIT_CONFIRMATION_REQUIRED', 'Type EDIT to apply Claude message changes.', 400);
+        const sessionId = decodeURIComponent(claudeEditApplyMatch[1]);
+        const turnId = decodeURIComponent(claudeEditApplyMatch[2]);
+        const result = await executeRecordedOperation({ kind: 'claude_message_edit', label: '编辑 Claude 会话消息', sessionIds: [sessionId] }, () => applyClaudeMessageEdits(claudeHome, sessionId, turnId, body.edits, { sourceHash: body.sourceHash, backupRoot: claudeTurnBackupRoot }), (value) => ({
+          result: { editedMessages: value.changedCount, claudeRefreshRecommended: true },
+          undo: { type: 'claude_message_edit_restore', backupRoot: claudeTurnBackupRoot, backupDir: value.backupDir, expectedCurrentHash: value.sourceHashAfter },
+        }));
+        claudeRegistryCache = null;
+        sendJson(response, 200, result);
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/claude-code/edit-restore' && request.method === 'POST') {
+        const body = await readJsonRequest(request);
+        if (body.confirmation !== 'RESTORE') throw new CleanerError('CLAUDE_EDIT_RESTORE_CONFIRMATION_REQUIRED', 'Type RESTORE to undo Claude message changes.', 400);
+        const result = await restoreClaudeMessageEdit(claudeHome, { backupRoot: claudeTurnBackupRoot, backupDir: body.backupDir, expectedCurrentHash: body.expectedCurrentHash });
         claudeRegistryCache = null;
         sendJson(response, 200, result);
         return;
