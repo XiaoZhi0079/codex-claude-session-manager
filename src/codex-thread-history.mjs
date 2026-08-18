@@ -455,3 +455,85 @@ export async function readThreadHistoryTurnRows(codexHome, sessionIds, options =
     db.close();
   }
 }
+
+export async function deleteOrphanFailedHistoryTurn(codexHome, input = {}, options = {}) {
+  const sessionId = String(input.sessionId || '');
+  const turnId = String(input.turnId || '');
+  const errorFactory = options.errorFactory || defaultError;
+  if (!SESSION_ID_RE.test(sessionId) || !SESSION_ID_RE.test(turnId)) {
+    throw errorFactory('INVALID_HISTORY_TURN', 'A valid session ID and turn ID are required.', 400);
+  }
+  if ((input.rolloutTurnIds || []).map(String).includes(turnId)) {
+    throw errorFactory('HISTORY_TURN_NOT_ORPHANED', 'This failure is present in the rollout and must be cleaned as a normal turn.', 409);
+  }
+  const dbPath = await resolveThreadHistoryDbPath(codexHome, options);
+  if (!dbPath || !await pathExists(dbPath)) {
+    throw errorFactory('THREAD_HISTORY_NOT_FOUND', 'The Codex thread history database was not found.', 404);
+  }
+  const sqlite = await loadSqlite();
+  const db = new sqlite.DatabaseSync(dbPath);
+  let transactionStarted = false;
+  try {
+    db.exec('PRAGMA busy_timeout=5000');
+    if (!['thread_turns', 'thread_items'].every((name) => tableExists(db, name))) {
+      throw errorFactory('UNSUPPORTED_THREAD_HISTORY', 'The Codex thread history schema is not supported.', 422);
+    }
+    const turn = db.prepare('SELECT * FROM thread_turns WHERE thread_id = ? AND turn_id = ?').get(sessionId, turnId);
+    if (!turn) throw errorFactory('HISTORY_TURN_NOT_FOUND', 'The selected history failure no longer exists.', 404);
+    if (turn.status !== 'failed' || typeof turn.error_json !== 'string' || !turn.error_json.trim()) {
+      throw errorFactory('HISTORY_TURN_NOT_FAILED', 'Only failed history turns with an error can be removed.', 409);
+    }
+    const items = db.prepare('SELECT * FROM thread_items WHERE thread_id = ? AND turn_id = ? ORDER BY rollout_ordinal').all(sessionId, turnId);
+    db.exec('BEGIN IMMEDIATE');
+    transactionStarted = true;
+    const itemRows = Number(db.prepare('DELETE FROM thread_items WHERE thread_id = ? AND turn_id = ?').run(sessionId, turnId).changes);
+    const turnRows = Number(db.prepare('DELETE FROM thread_turns WHERE thread_id = ? AND turn_id = ?').run(sessionId, turnId).changes);
+    db.exec('COMMIT');
+    transactionStarted = false;
+    return { dbPath, sessionId, turnId, turnRows, itemRows, removed: { turn, items } };
+  } catch (error) {
+    if (transactionStarted) {
+      try { db.exec('ROLLBACK'); } catch { /* Preserve the original error. */ }
+    }
+    throw error;
+  } finally {
+    db.close();
+  }
+}
+
+export async function restoreOrphanFailedHistoryTurn(codexHome, input = {}, options = {}) {
+  const turn = input.turn;
+  const items = Array.isArray(input.items) ? input.items : [];
+  const errorFactory = options.errorFactory || defaultError;
+  if (!turn || !SESSION_ID_RE.test(String(turn.thread_id || '')) || !SESSION_ID_RE.test(String(turn.turn_id || ''))) {
+    throw errorFactory('INVALID_HISTORY_RESTORE', 'The history restore payload is invalid.', 400);
+  }
+  const dbPath = await resolveThreadHistoryDbPath(codexHome, options);
+  const sqlite = await loadSqlite();
+  const db = new sqlite.DatabaseSync(dbPath);
+  let transactionStarted = false;
+  try {
+    db.exec('PRAGMA busy_timeout=5000');
+    if (db.prepare('SELECT 1 FROM thread_turns WHERE thread_id = ? AND turn_id = ?').get(turn.thread_id, turn.turn_id)) {
+      throw errorFactory('HISTORY_TURN_ALREADY_PRESENT', 'The failed history turn already exists.', 409);
+    }
+    db.exec('BEGIN IMMEDIATE');
+    transactionStarted = true;
+    const turnColumns = Object.keys(turn);
+    db.prepare(`INSERT INTO thread_turns (${turnColumns.join(',')}) VALUES (${turnColumns.map(() => '?').join(',')})`).run(...turnColumns.map((key) => turn[key]));
+    for (const item of items) {
+      const columns = Object.keys(item);
+      db.prepare(`INSERT INTO thread_items (${columns.join(',')}) VALUES (${columns.map(() => '?').join(',')})`).run(...columns.map((key) => item[key]));
+    }
+    db.exec('COMMIT');
+    transactionStarted = false;
+    return { dbPath, sessionId: turn.thread_id, turnId: turn.turn_id, turnRows: 1, itemRows: items.length };
+  } catch (error) {
+    if (transactionStarted) {
+      try { db.exec('ROLLBACK'); } catch { /* Preserve the original error. */ }
+    }
+    throw error;
+  } finally {
+    db.close();
+  }
+}

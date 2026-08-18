@@ -1051,7 +1051,12 @@ function renderTurns(turns) {
   const historyNotice = (state.historyErrors || []).length ? `
     <div class="turn-history-warning">
       <strong>分页历史中存在未匹配的失败轮次</strong>
-      ${(state.historyErrors || []).map((item) => `<div><code>${escapeHtml(item.turnId || '')}</code>：${escapeHtml(item.error?.message || 'Codex 记录为失败')}</div>`).join('')}
+      ${(state.historyErrors || []).map((item) => `
+        <div class="history-error-row">
+          <span><code>${escapeHtml(item.turnId || '')}</code>：${escapeHtml(item.error?.message || 'Codex 记录为失败')}</span>
+          <button type="button" class="btn btn-sm danger-outline" data-delete-history-error="${escapeHtml(item.turnId || '')}">删除失败轮次</button>
+        </div>
+      `).join('')}
     </div>
   ` : '';
   $('turns').innerHTML = historyNotice + `
@@ -1067,6 +1072,18 @@ function renderTurns(turns) {
       </button>
     `).join('')}
   `;
+}
+
+async function deleteHistoryErrorTurn(turnId) {
+  if (!state.selectedSession || !turnId) return;
+  const confirmed = window.confirm('只删除该孤立失败轮次的 Codex 分页历史记录，不修改 rollout。删除前会自动备份，是否继续？');
+  if (!confirmed) return;
+  const body = await api(`/api/sessions/${encodeURIComponent(state.selectedSession.id)}/history-errors/${encodeURIComponent(turnId)}/delete`, {
+    method: 'POST',
+    body: JSON.stringify({ confirmation: 'DELETE' }),
+  });
+  await loadTurns();
+  setAlert(`已删除孤立失败轮次 ${body.turnId || turnId}；SQLite 已备份，可从操作历史撤销。`, 'success');
 }
 
 function renderCleanupPreview(body) {
@@ -2865,6 +2882,11 @@ $('sessions').addEventListener('change', (event) => {
   updateBatchControls();
 });
 $('turns').addEventListener('click', (event) => {
+  const historyDelete = event.target.closest('[data-delete-history-error]');
+  if (historyDelete) {
+    deleteHistoryErrorTurn(historyDelete.dataset.deleteHistoryError).catch((error) => setAlert(error.message));
+    return;
+  }
   const row = event.target.closest('[data-turn-index]');
   if (!row) return;
   selectTurn(Number.parseInt(row.dataset.turnIndex, 10)).catch((error) => setAlert(error.message));

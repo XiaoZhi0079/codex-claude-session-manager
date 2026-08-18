@@ -1,5 +1,5 @@
 ﻿import http from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -49,7 +49,14 @@ import {
 } from './operation-backup.mjs';
 import { diagnoseSessionHealth } from './session-health.mjs';
 import { createOperationHistory } from './operation-history.mjs';
-import { inspectTargetSessionLocks, readThreadHistoryTurnRows } from './codex-thread-history.mjs';
+import {
+  deleteOrphanFailedHistoryTurn,
+  inspectTargetSessionLocks,
+  prepareThreadHistoryMutation,
+  readThreadHistoryTurnRows,
+  restoreOrphanFailedHistoryTurn,
+  withTargetSessionLocks,
+} from './codex-thread-history.mjs';
 import {
   buildClaudeSessionRegistry,
   getDefaultClaudeHome,
@@ -279,6 +286,19 @@ export function createCleanerServer(options = {}) {
         expectedCurrentHash: undo.expectedCurrentHash,
         backupRoot,
       });
+    }
+    if (undo.type === 'history_turn_restore') {
+      const manifestPath = path.resolve(String(undo.manifestPath || ''));
+      const allowedRoot = `${path.resolve(backupRoot)}${path.sep}`;
+      if (!manifestPath.startsWith(allowedRoot)) {
+        throw new CleanerError('UNSAFE_HISTORY_RESTORE', 'The history restore manifest is outside the backup directory.', 422);
+      }
+      const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+      return withTargetSessionLocks(codexHome, [manifest.turn.thread_id], {
+        errorFactory: (code, message, status, details) => new CleanerError(code, message, status, details),
+      }, () => restoreOrphanFailedHistoryTurn(codexHome, manifest, {
+        errorFactory: (code, message, status, details) => new CleanerError(code, message, status, details),
+      }));
     }
     if (undo.type === 'session_delete_restore') {
       const preview = await previewSessionDeletionBackupRestore(codexHome, {
@@ -995,6 +1015,44 @@ export function createCleanerServer(options = {}) {
           threadHistory: { available: history.available, dbPath: history.dbPath, rowCount: history.rows.length },
           recordCount: records.length,
         });
+        return;
+      }
+
+      const historyErrorDeleteMatch = requestUrl.pathname.match(/^\/api\/sessions\/([^/]+)\/history-errors\/([^/]+)\/delete$/);
+      if (historyErrorDeleteMatch && request.method === 'POST') {
+        const body = await readJsonRequest(request);
+        if (body.confirmation !== 'DELETE') {
+          throw new CleanerError('CONFIRMATION_REQUIRED', 'Type DELETE to remove this failed history turn.', 400);
+        }
+        const sessionId = decodeURIComponent(historyErrorDeleteMatch[1]);
+        const turnId = decodeURIComponent(historyErrorDeleteMatch[2]);
+        const session = await getSession(codexHome, sessionId, await loadSessions());
+        if (!session.rolloutPath) throw new CleanerError('ROLLOUT_NOT_FOUND', 'No rollout JSONL was found for this session.', 404);
+        const records = await readRollout(session.rolloutPath);
+        const rolloutTurnIds = listTurnsFromRecords(records).map((turn) => turn.turnId).filter(Boolean);
+        const timestamp = new Date().toISOString().replaceAll(':', '').replaceAll('.', '').replace('T', '-').replace('Z', '');
+        const backupDir = path.join(backupRoot, 'history-error-deletions', `${timestamp}-${sessionId}-${turnId}`);
+        const result = await executeRecordedOperation({
+          kind: 'history_error_delete',
+          label: '删除孤立分页历史失败轮次',
+          sessionIds: [sessionId],
+          details: { turnId },
+        }, () => withTargetSessionLocks(codexHome, [sessionId], {
+          errorFactory: (code, message, status, details) => new CleanerError(code, message, status, details),
+        }, async () => {
+          await mkdir(backupDir, { recursive: true });
+          const backup = await prepareThreadHistoryMutation(codexHome, [sessionId], backupDir);
+          const deleted = await deleteOrphanFailedHistoryTurn(codexHome, { sessionId, turnId, rolloutTurnIds }, {
+            errorFactory: (code, message, status, details) => new CleanerError(code, message, status, details),
+          });
+          const manifestPath = path.join(backupDir, 'removed-turn.json');
+          await writeFile(manifestPath, JSON.stringify(deleted.removed, null, 2), 'utf8');
+          return { ...deleted, backup, manifestPath };
+        }), (value) => ({
+          result: { turnId, removedTurns: value.turnRows, removedItems: value.itemRows },
+          undo: { type: 'history_turn_restore', manifestPath: value.manifestPath },
+        }));
+        sendJson(response, 200, result);
         return;
       }
 

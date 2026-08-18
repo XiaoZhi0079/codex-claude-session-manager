@@ -7,12 +7,14 @@ import { DatabaseSync } from 'node:sqlite';
 
 import {
   backupThreadHistoryDatabase,
+  deleteOrphanFailedHistoryTurn,
   inspectTargetSessionLocks,
   invalidateThreadHistory,
   prepareThreadHistoryMutation,
   readThreadHistoryState,
   readThreadHistoryTurnRows,
   resolveThreadHistoryDbPath,
+  restoreOrphanFailedHistoryTurn,
   withTargetSessionLocks,
 } from '../src/codex-thread-history.mjs';
 import {
@@ -23,6 +25,7 @@ import {
 
 const TARGET_ID = '019faa00-aaaa-7222-8333-444455556666';
 const OTHER_ID = '019faa00-bbbb-7222-8333-444455556666';
+const FAILED_TURN_ID = '019faa00-cccc-7222-8333-444455556666';
 
 async function historyFixture() {
   const root = await mkdtemp(path.join(os.tmpdir(), 'codex-thread-history-'));
@@ -131,6 +134,61 @@ test('database backup helper safely snapshots the current thread history', async
   const backupDb = new DatabaseSync(result.backupPath, { readOnly: true });
   assert.equal(backupDb.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
   backupDb.close();
+});
+
+test('deletes and restores only an orphan failed history turn', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codex-orphan-history-'));
+  const codexHome = path.join(root, '.codex');
+  await mkdir(codexHome, { recursive: true });
+  const dbPath = path.join(codexHome, 'thread_history_1.sqlite');
+  const db = new DatabaseSync(dbPath);
+  db.exec(`
+    CREATE TABLE thread_turns (
+      thread_id TEXT NOT NULL, turn_id TEXT NOT NULL, rollout_ordinal INTEGER NOT NULL,
+      status TEXT NOT NULL, error_json TEXT, started_at INTEGER, completed_at INTEGER,
+      PRIMARY KEY (thread_id, turn_id)
+    );
+    CREATE TABLE thread_items (
+      thread_id TEXT NOT NULL, turn_id TEXT NOT NULL, item_id TEXT NOT NULL,
+      rollout_ordinal INTEGER NOT NULL, created_at_ms INTEGER NOT NULL,
+      item_json TEXT NOT NULL, item_type TEXT NOT NULL, updated_at_ordinal INTEGER NOT NULL,
+      PRIMARY KEY (thread_id, turn_id, item_id)
+    );
+  `);
+  db.prepare('INSERT INTO thread_turns VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(TARGET_ID, FAILED_TURN_ID, 10, 'failed', JSON.stringify({ message: 'bad request' }), 1, 2);
+  db.prepare('INSERT INTO thread_turns VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(TARGET_ID, OTHER_ID, 20, 'completed', null, 3, 4);
+  db.prepare('INSERT INTO thread_items VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(TARGET_ID, FAILED_TURN_ID, 'user-1', 11, 1, '{"type":"userMessage"}', 'userMessage', 11);
+  db.close();
+
+  const deleted = await deleteOrphanFailedHistoryTurn(codexHome, {
+    sessionId: TARGET_ID,
+    turnId: FAILED_TURN_ID,
+    rolloutTurnIds: [OTHER_ID],
+  });
+  assert.deepEqual({ turns: deleted.turnRows, items: deleted.itemRows }, { turns: 1, items: 1 });
+  const afterDelete = new DatabaseSync(dbPath, { readOnly: true });
+  assert.equal(afterDelete.prepare('SELECT COUNT(*) AS count FROM thread_turns').get().count, 1);
+  assert.equal(afterDelete.prepare('SELECT status FROM thread_turns WHERE turn_id = ?').get(OTHER_ID).status, 'completed');
+  afterDelete.close();
+
+  const restored = await restoreOrphanFailedHistoryTurn(codexHome, deleted.removed);
+  assert.deepEqual({ turns: restored.turnRows, items: restored.itemRows }, { turns: 1, items: 1 });
+  const afterRestore = new DatabaseSync(dbPath, { readOnly: true });
+  assert.equal(afterRestore.prepare('SELECT error_json FROM thread_turns WHERE turn_id = ?').get(FAILED_TURN_ID).error_json, JSON.stringify({ message: 'bad request' }));
+  assert.equal(afterRestore.prepare('SELECT COUNT(*) AS count FROM thread_items WHERE turn_id = ?').get(FAILED_TURN_ID).count, 1);
+  afterRestore.close();
+
+  await assert.rejects(
+    deleteOrphanFailedHistoryTurn(codexHome, {
+      sessionId: TARGET_ID,
+      turnId: FAILED_TURN_ID,
+      rolloutTurnIds: [FAILED_TURN_ID],
+    }),
+    (error) => error?.code === 'HISTORY_TURN_NOT_ORPHANED',
+  );
 });
 
 test('cleanup backs up and invalidates only the selected paginated session', async () => {

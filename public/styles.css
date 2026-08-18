@@ -639,6 +639,23 @@ button:disabled {
   font-size: 11px;
 }
 
+.history-error-row {
+  align-items: flex-start;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  margin-top: 8px;
+}
+
+.history-error-row span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.history-error-row button {
+  flex: 0 0 auto;
+}
+
 .message-head,
 .change-head {
   align-items: center;
