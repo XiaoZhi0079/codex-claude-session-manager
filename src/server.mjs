@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { pickDirectory } from './directory-picker.mjs';
 
 import {
   applyCleanup,
@@ -459,6 +460,21 @@ export function createCleanerServer(options = {}) {
 
       if (requestUrl.pathname === '/api/health' && request.method === 'GET') {
         sendJson(response, 200, { ok: true });
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/system/select-directory' && request.method === 'POST') {
+        const body = await readJsonRequest(request);
+        if (body.initialPath !== undefined && typeof body.initialPath !== 'string') {
+          throw new CleanerError('INVALID_INITIAL_DIRECTORY', 'Initial directory must be a string.', 400);
+        }
+        let selectedPath;
+        try {
+          selectedPath = await (options.directoryPicker || pickDirectory)({ initialPath: body.initialPath || '' });
+        } catch {
+          throw new CleanerError('DIRECTORY_PICKER_FAILED', '无法打开系统目录选择窗口。', 500);
+        }
+        sendJson(response, 200, { canceled: !selectedPath, path: selectedPath || null });
         return;
       }
 

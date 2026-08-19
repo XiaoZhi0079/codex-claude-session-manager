@@ -326,8 +326,10 @@ dialog::backdrop { background: color-mix(in oklab, var(--bg) 55%, transparent); 
 .session-delete-dialog { width: min(760px, calc(100vw - 48px)); max-width: none; padding: 0; background: var(--surface); }
 .session-delete-card { display: grid; gap: 14px; padding: 18px; border: 0; border-radius: 10px; background: var(--surface); color: var(--fg); box-shadow: none; }
 .path-migration-field { display: grid; gap: 6px; }
-.path-migration-field > span { color: var(--muted); font-size: 11.5px; }
+.path-migration-field > span, .path-migration-field > label { color: var(--muted); font-size: 11.5px; }
 .path-migration-field input { width: 100%; font-family: var(--font-mono); }
+.path-picker-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+.path-picker-row button { min-width: 72px; white-space: nowrap; }
 #projectPathPlan { display: grid; gap: 12px; }
 #projectPathPlan.hidden { display: none; }
 .visibility-head { align-items: center; margin: 0; }

@@ -1869,6 +1869,13 @@ function closeProjectPathDialog() {
   $('projectPathDialog').close();
 }
 
+function invalidateProjectPathPlan() {
+  state.projectPathPlan = null;
+  $('projectPathConfirmation').value = '';
+  $('applyProjectPathButton').disabled = true;
+  $('projectPathPlan').classList.add('hidden');
+}
+
 function openProjectPathDialog() {
   const fromPath = selectedProjectDirectory();
   if (!fromPath) return;
@@ -1919,6 +1926,29 @@ async function previewProjectPathMigration() {
     renderProjectPathPlan(plan);
   } finally {
     $('previewProjectPathButton').disabled = false;
+  }
+}
+
+async function browseProjectPath() {
+  setAlert('');
+  const button = $('browseProjectPathButton');
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = '选择中…';
+  try {
+    const currentPath = $('projectPathTo').value.trim();
+    const result = await api('/api/system/select-directory', {
+      method: 'POST',
+      body: JSON.stringify({ initialPath: currentPath || $('projectPathFrom').value }),
+    });
+    if (!result.canceled && result.path) {
+      $('projectPathTo').value = result.path;
+      invalidateProjectPathPlan();
+      $('projectPathTo').focus();
+    }
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
   }
 }
 
@@ -2880,11 +2910,9 @@ $('sessionHealthActions').addEventListener('click', (event) => {
 $('visibilityButton').addEventListener('click', () => previewVisibilityRepair().catch((error) => setAlert(error.message)));
 $('projectPathButton').addEventListener('click', openProjectPathDialog);
 $('closeProjectPathButton').addEventListener('click', closeProjectPathDialog);
+$('browseProjectPathButton').addEventListener('click', () => browseProjectPath().catch((error) => setAlert(error.message)));
 $('previewProjectPathButton').addEventListener('click', () => previewProjectPathMigration().catch((error) => setAlert(error.message)));
-$('projectPathTo').addEventListener('input', () => {
-  state.projectPathPlan = null;
-  $('projectPathPlan').classList.add('hidden');
-});
+$('projectPathTo').addEventListener('input', invalidateProjectPathPlan);
 $('projectPathConfirmation').addEventListener('input', () => {
   $('applyProjectPathButton').disabled = !(
     state.projectPathPlan?.canApply

@@ -136,3 +136,41 @@ test('project path migration REST API records a reversible Claude operation', as
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('directory picker REST API returns a selected directory or a cancellation', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'directory-picker-api-'));
+  const selected = path.join(root, 'renamed-project');
+  const calls = [];
+  const server = createCleanerServer({
+    codexHome: path.join(root, '.codex'),
+    claudeHome: path.join(root, '.claude'),
+    backupRoot: path.join(root, 'backups'),
+    env: {},
+    directoryPicker: async (options) => {
+      calls.push(options);
+      return calls.length === 1 ? selected : null;
+    },
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const baseUrl = `http://127.0.0.1:${server.address().port}`;
+    const choose = async (initialPath) => {
+      const response = await fetch(`${baseUrl}/api/system/select-directory`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ initialPath }),
+      });
+      assert.equal(response.ok, true);
+      return response.json();
+    };
+    assert.deepEqual(await choose(root), { canceled: false, path: selected });
+    assert.deepEqual(await choose(root), { canceled: true, path: null });
+    assert.deepEqual(calls, [{ initialPath: root }, { initialPath: root }]);
+  } finally {
+    if (server.listening) await new Promise((resolve) => server.close(resolve));
+    await rm(root, { recursive: true, force: true });
+  }
+});

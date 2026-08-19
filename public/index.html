@@ -111,10 +111,13 @@
             <span>旧项目路径</span>
             <input id="projectPathFrom" type="text" readonly>
           </label>
-          <label class="path-migration-field">
-            <span>新项目路径</span>
-            <input id="projectPathTo" type="text" autocomplete="off" spellcheck="false" placeholder="例如 D:\\Projects\\new-name">
-          </label>
+          <div class="path-migration-field">
+            <label for="projectPathTo">新项目路径</label>
+            <div class="path-picker-row">
+              <input id="projectPathTo" type="text" autocomplete="off" spellcheck="false" placeholder="选择或输入已经改名后的目录">
+              <button id="browseProjectPathButton" type="button" class="outline-accent">浏览…</button>
+            </div>
+          </div>
           <button id="previewProjectPathButton" type="button" class="outline-accent wide-button">预览迁移</button>
           <section id="projectPathPlan" class="hidden">
             <dl class="visibility-grid">
