@@ -24,9 +24,13 @@ import { buildClaudeSessionRegistry } from './claude-sessions.mjs';
 const PATH_FIELDS = ['cwd', 'project_path', 'projectPath', 'workspace'];
 
 function normalizePath(value) {
-  const text = String(value || '').trim();
+  let text = String(value || '').trim();
   if (!text || !path.isAbsolute(text)) {
     throw new CleanerError('INVALID_PROJECT_PATH', 'Project paths must be absolute paths.', 400, { path: value });
+  }
+  if (process.platform === 'win32') {
+    if (/^\\\\\?\\UNC\\/i.test(text)) text = `\\\\${text.slice(8)}`;
+    else if (/^\\\\\?\\/i.test(text)) text = text.slice(4);
   }
   return path.normalize(text);
 }

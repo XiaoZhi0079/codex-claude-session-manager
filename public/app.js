@@ -759,8 +759,8 @@ function renderDirectories() {
 
 function selectedProjectDirectory() {
   const value = state.selectedDirectory;
-  if (!value || value === '*' || value.startsWith('__')) return null;
-  return value;
+  if (value && value !== '*' && !value.startsWith('__')) return value;
+  return displayPath(state.selectedSession?.projectPath) || null;
 }
 
 function updateProjectPathButton() {
@@ -1643,6 +1643,7 @@ async function selectSession(sessionId) {
   setAlert('');
   resetTurnWorkspace();
   state.selectedSession = state.sessions.find((session) => session.id === sessionId);
+  updateProjectPathButton();
   if (isClaudePlatform()) {
     $('deleteSessionButton').disabled = !state.selectedSession;
     $('deleteSessionButton').title = '备份完整会话包后删除该 Claude Code 会话';

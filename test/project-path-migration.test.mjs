@@ -26,7 +26,8 @@ test('Codex project path migration updates rollout, SQLite and index and can be 
   const rolloutPath = path.join(rolloutDir, `rollout-${SESSION_ID}.jsonl`);
   const backupRoot = path.join(codexHome, 'backups', 'test');
   await Promise.all([mkdir(rolloutDir, { recursive: true }), mkdir(newProject, { recursive: true })]);
-  await writeFile(rolloutPath, `${JSON.stringify({ type: 'session_meta', payload: { id: SESSION_ID, cwd: oldProject, model_provider: 'openai' } })}\n${JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hello' }] } })}\n`, 'utf8');
+  const rolloutProjectPath = process.platform === 'win32' ? `\\\\?\\${oldProject}` : oldProject;
+  await writeFile(rolloutPath, `${JSON.stringify({ type: 'session_meta', payload: { id: SESSION_ID, cwd: rolloutProjectPath, model_provider: 'openai' } })}\n${JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hello' }] } })}\n`, 'utf8');
   await writeFile(path.join(codexHome, 'session_index.jsonl'), `${JSON.stringify({ id: SESSION_ID, cwd: oldProject, title: '迁移测试' })}\n`, 'utf8');
   const dbPath = path.join(codexHome, 'state_5.sqlite');
   const db = new DatabaseSync(dbPath);
@@ -46,7 +47,7 @@ test('Codex project path migration updates rollout, SQLite and index and can be 
   changedDb.close();
 
   await restoreProjectPathMigration('codex', codexHome, { backupRoot, backupDir: applied.backup.backupDir });
-  assert.equal(JSON.parse((await readFile(rolloutPath, 'utf8')).split(/\r?\n/)[0]).payload.cwd, oldProject);
+  assert.equal(JSON.parse((await readFile(rolloutPath, 'utf8')).split(/\r?\n/)[0]).payload.cwd, rolloutProjectPath);
   const restoredDb = new DatabaseSync(dbPath, { readOnly: true });
   assert.equal(restoredDb.prepare('SELECT cwd FROM threads WHERE id = ?').get(SESSION_ID).cwd, oldProject);
   restoredDb.close();
