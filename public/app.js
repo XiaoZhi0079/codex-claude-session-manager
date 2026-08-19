@@ -142,7 +142,7 @@ async function setPlatform(platform) {
   if (platform !== 'codex' && platform !== 'claude') return;
   if (state.platform === platform && state.sessions.length) return;
   state.platform = platform;
-  try { localStorage.setItem('ctc-platform', platform); } catch {}
+  try { localStorage.setItem('ccsm-platform', platform); } catch {}
   state.sessions = [];
   state.directories = [];
   state.turns = [];
@@ -211,7 +211,7 @@ function panelConfig(id) {
 function readPanelLayout() {
   const defaults = Object.fromEntries(PANEL_CONFIG.map((panel) => [panel.id, panel.initial]));
   try {
-    const saved = JSON.parse(localStorage.getItem('ctc-panel-layout') || '{}');
+    const saved = JSON.parse(localStorage.getItem('ccsm-panel-layout') || localStorage.getItem('ctc-panel-layout') || '{}');
     const known = new Set(PANEL_CONFIG.map((panel) => panel.id));
     const collapsed = new Set((saved.collapsed || []).filter((id) => known.has(id)));
     if (collapsed.size === PANEL_CONFIG.length) collapsed.delete('operations');
@@ -228,7 +228,7 @@ const panelLayout = readPanelLayout();
 
 function savePanelLayout() {
   try {
-    localStorage.setItem('ctc-panel-layout', JSON.stringify({
+    localStorage.setItem('ccsm-panel-layout', JSON.stringify({
       widths: panelLayout.widths,
       collapsed: [...panelLayout.collapsed],
     }));
@@ -363,14 +363,14 @@ function initTheme() {
       ? '<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>'
       : '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/>';
   };
-  const saved = localStorage.getItem('ctc-theme');
+  const saved = localStorage.getItem('ccsm-theme') || localStorage.getItem('ctc-theme');
   const initial = saved || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
   document.documentElement.setAttribute('data-theme', initial);
   applyIcon();
   $('themeButton').addEventListener('click', () => {
     const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
     document.documentElement.setAttribute('data-theme', next);
-    localStorage.setItem('ctc-theme', next);
+    localStorage.setItem('ccsm-theme', next);
     applyIcon();
   });
 }
@@ -3090,7 +3090,7 @@ $('confirmation').addEventListener('input', () => {
 $('applyButton').addEventListener('click', () => applyCleanup().catch((error) => setAlert(error.message)));
 
 try {
-  const savedPlatform = localStorage.getItem('ctc-platform');
+  const savedPlatform = localStorage.getItem('ccsm-platform') || localStorage.getItem('ctc-platform');
   if (savedPlatform === 'claude' || savedPlatform === 'codex') state.platform = savedPlatform;
 } catch {}
 configurePlatformUI();

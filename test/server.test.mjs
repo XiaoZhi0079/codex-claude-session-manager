@@ -36,7 +36,7 @@ async function request(baseUrl, pathname, body) {
 }
 
 test('server records a cleanup and safely undoes the latest operation', async () => {
-  const temp = await mkdtemp(path.join(os.tmpdir(), 'codex-turn-cleaner-server-'));
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'codex-claude-session-manager-server-'));
   const codexHome = path.join(temp, '.codex');
   const backupRoot = path.join(temp, 'backups');
   const rolloutPath = path.join(temp, 'rollout-test-session.jsonl');
@@ -89,7 +89,7 @@ test('server records a cleanup and safely undoes the latest operation', async ()
 test('rollout-path mutation resolves the target session and invalidates only its history projection', async () => {
   const targetId = '019faa00-aaaa-7222-8333-444455556666';
   const otherId = '019faa00-bbbb-7222-8333-444455556666';
-  const temp = await mkdtemp(path.join(os.tmpdir(), 'codex-turn-cleaner-server-history-'));
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'codex-claude-session-manager-server-history-'));
   const codexHome = path.join(temp, '.codex');
   const backupRoot = path.join(temp, 'backups');
   const rolloutPath = path.join(temp, `rollout-${targetId}.jsonl`);

@@ -132,8 +132,8 @@ export async function inspectTargetSessionLocks(codexHome, sessionIds, options =
   }
 
   const script = [
-    '$root = $env:CODEX_CLEANER_LOCK_ROOT',
-    '$ids = ConvertFrom-Json -InputObject $env:CODEX_CLEANER_SESSION_IDS',
+    '$root = $env:CODEX_CLAUDE_SESSION_MANAGER_LOCK_ROOT',
+    '$ids = ConvertFrom-Json -InputObject $env:CODEX_CLAUDE_SESSION_MANAGER_SESSION_IDS',
     '$rows = @()',
     'foreach ($id in $ids) {',
     '  $p = Join-Path $root ($id + ".lock")',
@@ -167,8 +167,8 @@ export async function inspectTargetSessionLocks(codexHome, sessionIds, options =
       maxBuffer: 2_000_000,
       env: {
         ...process.env,
-        CODEX_CLEANER_LOCK_ROOT: lockRoot,
-        CODEX_CLEANER_SESSION_IDS: JSON.stringify(ids),
+        CODEX_CLAUDE_SESSION_MANAGER_LOCK_ROOT: lockRoot,
+        CODEX_CLAUDE_SESSION_MANAGER_SESSION_IDS: JSON.stringify(ids),
       },
     });
     const sessions = normalizeProbeRows(stdout.trim() ? JSON.parse(stdout) : [], ids);
@@ -192,8 +192,8 @@ export async function inspectTargetSessionLocks(codexHome, sessionIds, options =
 function acquireWindowsLocks(lockRoot, sessionIds, options = {}) {
   const script = [
     '$ErrorActionPreference = "Stop"',
-    '$root = $env:CODEX_CLEANER_LOCK_ROOT',
-    '$ids = ConvertFrom-Json -InputObject $env:CODEX_CLEANER_SESSION_IDS',
+    '$root = $env:CODEX_CLAUDE_SESSION_MANAGER_LOCK_ROOT',
+    '$ids = ConvertFrom-Json -InputObject $env:CODEX_CLAUDE_SESSION_MANAGER_SESSION_IDS',
     '[System.IO.Directory]::CreateDirectory($root) | Out-Null',
     '$streams = @()',
     'try {',
@@ -225,8 +225,8 @@ function acquireWindowsLocks(lockRoot, sessionIds, options = {}) {
     stdio: ['pipe', 'pipe', 'pipe'],
     env: {
       ...process.env,
-      CODEX_CLEANER_LOCK_ROOT: lockRoot,
-      CODEX_CLEANER_SESSION_IDS: JSON.stringify(sessionIds),
+      CODEX_CLAUDE_SESSION_MANAGER_LOCK_ROOT: lockRoot,
+      CODEX_CLAUDE_SESSION_MANAGER_SESSION_IDS: JSON.stringify(sessionIds),
     },
   });
   const errorFactory = options.errorFactory || defaultError;

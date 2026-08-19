@@ -51,7 +51,7 @@ async function fixture({ live = true, backup = false, indexedTitle = null } = {}
   const root = await mkdtemp(path.join(os.tmpdir(), 'codex-registry-'));
   const codexHome = path.join(root, '.codex');
   const sessionsDir = path.join(codexHome, 'sessions', '2026', '07', '01');
-  const backupRoot = path.join(codexHome, 'backups', 'codex-turn-cleaner');
+  const backupRoot = path.join(codexHome, 'backups', 'codex-claude-session-manager');
   const rolloutPath = path.join(
     sessionsDir,
     `rollout-2026-07-01T00-00-00-${SESSION_ID}.jsonl`,

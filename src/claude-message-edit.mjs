@@ -6,7 +6,7 @@ import { CleanerError, hashRolloutSource, writeFileAtomically } from './core.mjs
 import { findSession, publicSession, selectedTurn } from './claude-sessions.mjs';
 
 function editRoot(claudeHome, options = {}) {
-  return path.resolve(options.backupRoot || path.join(claudeHome, 'backups', 'local-session-manager-edits'));
+  return path.resolve(options.backupRoot || path.join(claudeHome, 'backups', 'codex-claude-session-manager-edits'));
 }
 
 function targetParts(record, blockIndex) {

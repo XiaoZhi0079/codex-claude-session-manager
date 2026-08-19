@@ -51,8 +51,8 @@ function rollout(provider = 'old-provider') {
 async function fixture() {
   const root = await mkdtemp(path.join(os.tmpdir(), 'codex-operation-backup-'));
   const codexHome = path.join(root, '.codex');
-  const backupRoot = path.join(codexHome, 'backups', 'codex-turn-cleaner');
-  const backupDir = path.join(backupRoot, 'codex-turn-cleaner-2026-07-24-010203004');
+  const backupRoot = path.join(codexHome, 'backups', 'codex-claude-session-manager');
+  const backupDir = path.join(backupRoot, 'codex-claude-session-manager-2026-07-24-010203004');
   const fileName = `rollout-2026-07-24T00-00-00-${SESSION_ID}.jsonl`;
   const backupPath = path.join(backupDir, fileName);
   const rolloutPath = path.join(codexHome, 'sessions', '2026', '07', '24', fileName);
@@ -224,7 +224,7 @@ test('operation snapshots can be permanently deleted without recursive broad del
 test('system backup cleanup only removes validated backup directories', async () => {
   const data = await fixture();
   const visibilityDir = path.join(data.backupRoot, 'codex-visibility-sync-2026-07-30-010203004');
-  const emptySnapshotDir = path.join(data.backupRoot, 'codex-turn-cleaner-2026-07-20-010203004');
+  const emptySnapshotDir = path.join(data.backupRoot, 'codex-claude-session-manager-2026-07-20-010203004');
   await mkdir(visibilityDir, { recursive: true });
   await mkdir(emptySnapshotDir, { recursive: true });
   await writeFile(path.join(visibilityDir, 'manifest.json'), '{}', 'utf8');

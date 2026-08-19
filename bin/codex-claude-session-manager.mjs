@@ -6,9 +6,9 @@ import { getDefaultClaudeHome } from '../src/claude-sessions.mjs';
 
 function printHelp() {
   process.stdout.write([
-    'Local Session Manager',
+    'Codex & Claude Code Session Manager',
     '',
-    'Usage: codex-turn-cleaner [options]',
+    'Usage: codex-claude-session-manager [options]',
     '',
     'Options:',
     '  --port <port>          Listen on a specific local port',
@@ -56,7 +56,7 @@ async function main() {
   const codexHome = options.codexHome || getDefaultCodexHome();
   const claudeHome = options.claudeHome || getDefaultClaudeHome();
   const { server, url } = await startCleanerServer({ ...options, codexHome, claudeHome });
-  process.stdout.write(`Local Session Manager running at ${url}\n`);
+  process.stdout.write(`Codex & Claude Code Session Manager running at ${url}\n`);
   process.stdout.write(`Codex data: ${codexHome}\n`);
   process.stdout.write(`Claude Code data: ${claudeHome}\n`);
   process.stdout.write('Press Ctrl+C to stop.\n');
@@ -72,9 +72,9 @@ try {
   await main();
 } catch (error) {
   if (error?.code === 'EACCES') {
-    process.stderr.write('The selected port is blocked by Windows. Use --port or CODEX_CLEANER_PORT.\n');
+    process.stderr.write('The selected port is blocked by Windows. Use --port or CODEX_CLAUDE_SESSION_MANAGER_PORT.\n');
   } else if (error?.code === 'EADDRINUSE') {
-    process.stderr.write('The selected port is already in use. Use --port or CODEX_CLEANER_PORT.\n');
+    process.stderr.write('The selected port is already in use. Use --port or CODEX_CLAUDE_SESSION_MANAGER_PORT.\n');
   } else {
     process.stderr.write(`${error?.message || error}\n`);
   }

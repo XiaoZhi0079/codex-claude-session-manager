@@ -1,4 +1,5 @@
 ﻿import http from 'node:http';
+import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -244,19 +245,28 @@ async function resolveMutationTarget(codexHome, body, sessions = null) {
   return { rolloutPath, sessionId };
 }
 
+function compatibleBackupRoot(home, currentName, legacyName) {
+  const current = path.join(home, 'backups', currentName);
+  const legacy = path.join(home, 'backups', legacyName);
+  return !existsSync(current) && existsSync(legacy) ? legacy : current;
+}
+
 export function createCleanerServer(options = {}) {
   const env = options.env || process.env;
   const codexHome = options.codexHome || getDefaultCodexHome(env);
   const claudeHome = options.claudeHome || getDefaultClaudeHome(env);
   const backupRoot = options.backupRoot
+    || env.CODEX_CLAUDE_SESSION_MANAGER_BACKUP_ROOT
     || env.CODEX_CLEANER_BACKUP_ROOT
-    || path.join(codexHome, 'backups', 'codex-turn-cleaner');
+    || compatibleBackupRoot(codexHome, 'codex-claude-session-manager', 'codex-turn-cleaner');
   const claudeBackupRoot = options.claudeBackupRoot
+    || env.CODEX_CLAUDE_SESSION_MANAGER_CLAUDE_BACKUP_ROOT
     || env.CLAUDE_SESSION_MANAGER_BACKUP_ROOT
-    || path.join(claudeHome, 'backups', 'local-session-manager-deleted-sessions');
+    || compatibleBackupRoot(claudeHome, 'codex-claude-session-manager-deleted-sessions', 'local-session-manager-deleted-sessions');
   const claudeTurnBackupRoot = options.claudeTurnBackupRoot
+    || env.CODEX_CLAUDE_SESSION_MANAGER_CLAUDE_TURN_BACKUP_ROOT
     || env.CLAUDE_TURN_MANAGER_BACKUP_ROOT
-    || path.join(claudeHome, 'backups', 'local-session-manager-deleted-turns');
+    || compatibleBackupRoot(claudeHome, 'codex-claude-session-manager-deleted-turns', 'local-session-manager-deleted-turns');
   const publicDir = options.publicDir || path.join(__dirname, '..', 'public');
   const operationHistory = createOperationHistory({
     backupRoot,
@@ -1387,7 +1397,11 @@ export function createCleanerServer(options = {}) {
 }
 
 export function resolveCleanerPort(options = {}, env = process.env) {
-  const raw = options.port ?? env.CODEX_CLEANER_PORT ?? env.PORT ?? '18797';
+  const raw = options.port
+    ?? env.CODEX_CLAUDE_SESSION_MANAGER_PORT
+    ?? env.CODEX_CLEANER_PORT
+    ?? env.PORT
+    ?? '18797';
   const port = Number.parseInt(String(raw), 10);
   if (!Number.isInteger(port) || port < 0 || port > 65535 || String(raw).trim() !== String(port)) {
     throw new CleanerError('INVALID_PORT', 'Cleaner port must be an integer from 0 to 65535.', 400, { port: raw });
@@ -1397,6 +1411,7 @@ export function resolveCleanerPort(options = {}, env = process.env) {
 
 function hasExplicitPort(options, env) {
   return options.port !== undefined
+    || env.CODEX_CLAUDE_SESSION_MANAGER_PORT !== undefined
     || env.CODEX_CLEANER_PORT !== undefined
     || env.PORT !== undefined;
 }
@@ -1445,5 +1460,5 @@ export async function startCleanerServer(options = {}) {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const { url } = await startCleanerServer();
-  process.stdout.write(`Codex Turn Cleaner running at ${url}\n`);
+  process.stdout.write(`Codex & Claude Code Session Manager running at ${url}\n`);
 }

@@ -228,7 +228,7 @@ test('thread history failures merge by turn id and preserve unmatched diagnostic
 });
 
 test('cleanup requires the preview hash and preserves untouched raw lines', async () => {
-  const temp = await mkdtemp(path.join(os.tmpdir(), 'codex-turn-cleaner-'));
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'codex-claude-session-manager-'));
   const rolloutPath = path.join(temp, 'rollout-session-1.jsonl');
   const backupRoot = path.join(temp, 'backups');
   const source = modernFixture()

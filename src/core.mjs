@@ -828,7 +828,7 @@ function timestampForPath(now = new Date()) {
   return now.toISOString().replaceAll(':', '').replaceAll('.', '').replace('T', '-').replace('Z', '');
 }
 
-export async function createBackup({ files, backupRoot, label = 'codex-turn-cleaner', now = new Date() }) {
+export async function createBackup({ files, backupRoot, label = 'codex-claude-session-manager', now = new Date() }) {
   const backupDir = path.join(backupRoot, `${label}-${timestampForPath(now)}`);
   await mkdir(backupDir, { recursive: true });
 

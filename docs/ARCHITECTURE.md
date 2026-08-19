@@ -2,7 +2,7 @@
 
 ## 目标与边界
 
-Local Session Manager 是本地单进程工具：Node.js HTTP 服务负责扫描和受控写入，原生 HTML/CSS/JavaScript 页面负责交互。没有远端后端、登录系统或第三方运行时依赖。服务默认绑定 `127.0.0.1`。
+Codex & Claude Code Session Manager 是本地单进程工具：Node.js HTTP 服务负责扫描和受控写入，原生 HTML/CSS/JavaScript 页面负责交互。没有远端后端、登录系统或第三方运行时依赖。服务默认绑定 `127.0.0.1`。
 
 工具不把 `config.toml` 当作会话清单。供应商配置只用于确定当前目标供应商；会话身份与正文来自多个可验证数据源的合并。
 
@@ -10,7 +10,7 @@ Local Session Manager 是本地单进程工具：Node.js HTTP 服务负责扫描
 
 | 文件 | 职责 |
 |---|---|
-| `bin/codex-turn-cleaner.mjs` | 命令行参数、启动和退出处理 |
+| `bin/codex-claude-session-manager.mjs` | 命令行参数、启动和退出处理 |
 | `src/server.mjs` | 静态页面、REST 路由、写操作审计和一键撤销编排 |
 | `src/registry.mjs` | 合并扫描会话来源、判定 Codex 可见性、供应商统一及逐项备份清单 |
 | `src/core.mjs` | JSONL 解析、轮次边界、消息编辑、轮次清理和 rollout 恢复 |

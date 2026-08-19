@@ -26,7 +26,7 @@ function requireInside(root, candidate, label) {
 }
 
 function turnDeletionBackupRoot(claudeHome, options = {}) {
-  return path.resolve(options.backupRoot || path.join(claudeHome, 'backups', 'local-session-manager-deleted-turns'));
+  return path.resolve(options.backupRoot || path.join(claudeHome, 'backups', 'codex-claude-session-manager-deleted-turns'));
 }
 
 function requireTurnDeleteMode(mode) {

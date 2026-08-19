@@ -44,6 +44,11 @@ const SNAPSHOT_KINDS = [
     label: '消息编辑前快照',
   },
   {
+    prefix: 'codex-claude-session-manager-',
+    kind: 'turn_cleanup',
+    label: '轮次清理前快照',
+  },
+  {
     prefix: 'codex-turn-cleaner-',
     kind: 'turn_cleanup',
     label: '轮次清理前快照',
@@ -171,7 +176,7 @@ async function readSnapshot(backupRoot, directory, entry) {
 
 export async function listOperationBackups(codexHome, options = {}) {
   const backupRoot = options.backupRoot
-    || path.join(codexHome, 'backups', 'codex-turn-cleaner');
+    || path.join(codexHome, 'backups', 'codex-claude-session-manager');
   let directories;
   try {
     directories = await readdir(backupRoot, { withFileTypes: true });
@@ -605,7 +610,7 @@ export async function applyOperationBackupRestore(codexHome, options = {}) {
     throw new CleanerError('SNAPSHOT_ALREADY_RESTORED', 'This snapshot is already the current session state.', 422);
   }
   const backupRoot = options.backupRoot
-    || path.join(codexHome, 'backups', 'codex-turn-cleaner');
+    || path.join(codexHome, 'backups', 'codex-claude-session-manager');
   const now = options.now instanceof Date ? options.now : new Date();
   const safety = await createRestoreSafetyPoint(codexHome, preview, backupRoot, now, options);
   const threadHistory = safety.threadHistory;
@@ -776,7 +781,7 @@ async function systemBackupEntry(root, fullPath, type, typeLabel) {
 
 export async function listSystemBackups(codexHome, options = {}) {
   const root = options.backupRoot
-    || path.join(codexHome, 'backups', 'codex-turn-cleaner');
+    || path.join(codexHome, 'backups', 'codex-claude-session-manager');
   let entries;
   try {
     entries = await readdir(root, { withFileTypes: true });
@@ -1037,7 +1042,7 @@ export async function applyVisibilityBackupRestore(codexHome, options = {}) {
       throw new CleanerError('STALE_VISIBILITY_RESTORE', 'A rollout changed after preview.', 409, { id: item.id });
     }
   }
-  const backupRoot = options.backupRoot || path.join(codexHome, 'backups', 'codex-turn-cleaner');
+  const backupRoot = options.backupRoot || path.join(codexHome, 'backups', 'codex-claude-session-manager');
   const safety = await createVisibilityRestoreSafety(preview, backupRoot, options.now || new Date());
   const changedRolloutIds = new Set();
   let db;

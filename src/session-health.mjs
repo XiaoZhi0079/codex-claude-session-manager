@@ -217,7 +217,7 @@ async function fileState(filePath) {
 }
 
 function availableInBackupManager(filePath) {
-  return /[\\/](?:codex-turn-editor-restore-point-|codex-turn-editor-|codex-turn-cleaner-)[^\\/]+[\\/]/i
+  return /[\\/](?:codex-turn-editor-restore-point-|codex-turn-editor-|codex-claude-session-manager-|codex-turn-cleaner-)[^\\/]+[\\/]/i
     .test(String(filePath || ''));
 }
 

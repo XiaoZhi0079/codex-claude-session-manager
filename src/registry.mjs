@@ -380,7 +380,7 @@ function sessionStatus(session) {
 export async function buildSessionRegistry(codexHome, options = {}) {
   const env = options.env || process.env;
   const backupRoot = options.backupRoot
-    || path.join(codexHome, 'backups', 'codex-turn-cleaner');
+    || path.join(codexHome, 'backups', 'codex-claude-session-manager');
   const codexState = await resolveCodexState(codexHome, env);
   const [fileSessions, primaryDb, backups] = await Promise.all([
     listFileSessions(codexHome),
@@ -849,7 +849,7 @@ export async function applyCodexVisibilityRepair(codexHome, options = {}) {
   }
 
   const backupRoot = options.backupRoot
-    || path.join(codexHome, 'backups', 'codex-turn-cleaner');
+    || path.join(codexHome, 'backups', 'codex-claude-session-manager');
   const backup = await createVisibilityBackup(preview, backupRoot, options.now || new Date());
   const backupBySource = new Map(backup.copied.map((item) => [normalizePathKey(item.source), item.backup]));
   const restoredTargets = [];

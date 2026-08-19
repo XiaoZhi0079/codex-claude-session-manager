@@ -40,7 +40,7 @@ async function fixture({ withRollout = true } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'codex-session-delete-'));
   const codexHome = path.join(root, '.codex');
   const sessionsDir = path.join(codexHome, 'sessions', '2026', '07', '01');
-  const backupRoot = path.join(codexHome, 'backups', 'codex-turn-cleaner');
+  const backupRoot = path.join(codexHome, 'backups', 'codex-claude-session-manager');
   const rolloutPath = path.join(sessionsDir, `rollout-2026-07-01T00-00-00-${SESSION_ID}.jsonl`);
   await mkdir(sessionsDir, { recursive: true });
   await mkdir(backupRoot, { recursive: true });
@@ -203,7 +203,7 @@ test('whole-session deletion accepts Windows extended-length rollout paths', asy
 
 test('backup-only session deletion permanently removes tool-owned historical backups', async () => {
   const data = await fixture({ withRollout: true });
-  const historicalDir = path.join(data.backupRoot, 'codex-turn-cleaner-2026-07-30-123500000');
+  const historicalDir = path.join(data.backupRoot, 'codex-claude-session-manager-2026-07-30-123500000');
   const historicalPath = path.join(historicalDir, path.basename(data.rolloutPath));
   await mkdir(historicalDir, { recursive: true });
   await writeFile(historicalPath, rollout(), 'utf8');

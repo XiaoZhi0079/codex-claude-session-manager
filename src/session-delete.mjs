@@ -171,7 +171,7 @@ async function fileFingerprint(filePath) {
 function deletionBackupRoot(codexHome, options) {
   if (options.deletionBackupRoot) return options.deletionBackupRoot;
   const ordinaryBackupRoot = options.backupRoot
-    || path.join(codexHome, 'backups', 'codex-turn-cleaner');
+    || path.join(codexHome, 'backups', 'codex-claude-session-manager');
   return `${ordinaryBackupRoot}-deleted-sessions`;
 }
 
@@ -1445,7 +1445,7 @@ export async function applySessionDeletionBackupRestore(codexHome, options = {})
     throw new CleanerError('BACKUP_ALREADY_RESTORED', 'The selected sessions are already present.', 422);
   }
   const ordinaryBackupRoot = options.backupRoot
-    || path.join(codexHome, 'backups', 'codex-turn-cleaner');
+    || path.join(codexHome, 'backups', 'codex-claude-session-manager');
   const now = options.now instanceof Date ? options.now : new Date();
   const safety = await createRestoreSafetyBackup(codexHome, preview, ordinaryBackupRoot, now, options);
   const copiedRollouts = [];

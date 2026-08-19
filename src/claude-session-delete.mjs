@@ -171,7 +171,7 @@ function publicSessionPlan(session) {
 }
 
 function deletionBackupRoot(claudeHome, options = {}) {
-  return path.resolve(options.backupRoot || path.join(claudeHome, 'backups', 'local-session-manager-deleted-sessions'));
+  return path.resolve(options.backupRoot || path.join(claudeHome, 'backups', 'codex-claude-session-manager-deleted-sessions'));
 }
 
 async function assertBackupRoot(root, { create = false } = {}) {

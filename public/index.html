@@ -3,10 +3,10 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Local Session Manager</title>
+    <title>Codex &amp; Claude Code Session Manager</title>
     <script>
       try {
-        const savedTheme = localStorage.getItem('ctc-theme');
+        const savedTheme = localStorage.getItem('ccsm-theme') || localStorage.getItem('ctc-theme');
         const initialTheme = savedTheme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
         document.documentElement.setAttribute('data-theme', initialTheme);
       } catch {}
@@ -17,7 +17,7 @@
   <body>
     <main class="shell">
       <header class="topbar">
-        <div class="brand"><h1>Local Session Manager</h1></div>
+        <div class="brand"><h1>Codex &amp; Claude Code Session Manager</h1></div>
         <nav class="platform-switch" aria-label="选择会话平台">
           <button id="codexPlatformButton" type="button" class="active" aria-pressed="true">Codex</button>
           <button id="claudePlatformButton" type="button" aria-pressed="false">Claude Code</button>
