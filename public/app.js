@@ -50,6 +50,7 @@ const state = {
   backupRestoreDetectionSignature: null,
   operationHistory: null,
   lastHistoryErrorDeletion: null,
+  alertTimer: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -379,9 +380,21 @@ function initTheme() {
 
 function setAlert(message, type = 'error') {
   const alert = $('alert');
+  if (state.alertTimer) {
+    clearTimeout(state.alertTimer);
+    state.alertTimer = null;
+  }
   alert.textContent = message;
   alert.className = `alert ${type}`;
-  if (!message) alert.classList.add('hidden');
+  if (!message) {
+    alert.classList.add('hidden');
+    return;
+  }
+  state.alertTimer = setTimeout(() => {
+    alert.textContent = '';
+    alert.classList.add('hidden');
+    state.alertTimer = null;
+  }, type === 'success' ? 6_000 : 8_000);
 }
 
 async function api(path, options = {}) {
