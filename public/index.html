@@ -98,6 +98,41 @@
         </div>
       </dialog>
 
+      <dialog id="projectPathDialog" class="session-delete-dialog">
+        <div class="session-delete-card">
+          <div class="visibility-head">
+            <div>
+              <h2>迁移项目路径</h2>
+              <p id="projectPathIntro">实际文件夹改名后，把该目录下的历史会话关联到新路径；不会移动项目文件。</p>
+            </div>
+            <button id="closeProjectPathButton" type="button">关闭</button>
+          </div>
+          <label class="path-migration-field">
+            <span>旧项目路径</span>
+            <input id="projectPathFrom" type="text" readonly>
+          </label>
+          <label class="path-migration-field">
+            <span>新项目路径</span>
+            <input id="projectPathTo" type="text" autocomplete="off" spellcheck="false" placeholder="例如 D:\\Projects\\new-name">
+          </label>
+          <button id="previewProjectPathButton" type="button" class="outline-accent wide-button">预览迁移</button>
+          <section id="projectPathPlan" class="hidden">
+            <dl class="visibility-grid">
+              <dt>受影响会话</dt><dd id="projectPathSessions">-</dd>
+              <dt>正文文件</dt><dd id="projectPathFiles">-</dd>
+              <dt id="projectPathSecondaryLabel">SQLite 记录</dt><dd id="projectPathSecondary">-</dd>
+              <dt>索引文件 / 记录</dt><dd id="projectPathIndexes">-</dd>
+            </dl>
+            <div id="projectPathWarning" class="mode-warning warning hidden"></div>
+            <label class="confirm visibility-confirm">
+              <span>输入 MIGRATE 确认</span>
+              <input id="projectPathConfirmation" autocomplete="off" spellcheck="false">
+            </label>
+            <button id="applyProjectPathButton" type="button" class="primary wide-button" disabled>备份并迁移会话路径</button>
+          </section>
+        </div>
+      </dialog>
+
       <dialog id="sessionHealthDialog" class="session-health-dialog">
         <div class="session-health-card">
           <div class="dialog-head">
@@ -332,6 +367,7 @@
             <select id="directoryFilter" aria-label="项目目录"><option value="">选择项目目录...</option></select>
             <input id="sessionFilter" type="search" placeholder="筛选标题 / 会话 ID" disabled>
             <div id="sessionCommandbar" class="session-commandbar" aria-label="会话管理操作">
+              <button id="projectPathButton" type="button" class="btn btn-sm outline-accent" disabled>迁移项目路径</button>
               <button id="visibilityButton" type="button" class="btn btn-sm outline-accent">可见性修复</button>
               <button id="batchDeleteSessionsButton" type="button" class="btn btn-sm danger-outline" disabled>批量删除</button>
             </div>

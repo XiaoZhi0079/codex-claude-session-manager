@@ -22,6 +22,7 @@ const state = {
   currentProvider: null,
   registrySummary: null,
   visibilityPlan: null,
+  projectPathPlan: null,
   healthSessionId: null,
   healthDiagnosis: null,
   sessionDeletePlan: null,
@@ -96,6 +97,7 @@ function configurePlatformUI() {
   $('backupManagerButton').classList.remove('hidden');
   $('sessionCommandbar').classList.remove('hidden');
   $('visibilityButton').classList.toggle('hidden', claude);
+  updateProjectPathButton();
   $('batchToolbar').classList.remove('hidden');
   $('deleteSessionButton').classList.remove('hidden');
   $('operationSwitcher').classList.remove('hidden');
@@ -487,6 +489,7 @@ function operationDetailsText(operation) {
   if (details.turnId) parts.push(`轮次：${details.turnId}`);
   if (details.selector) parts.push(`轮次：${details.selector.turnId || (details.selector.index !== undefined ? `第 ${Number(details.selector.index) + 1} 轮` : '已选轮次')}`);
   if (details.mode) parts.push(`模式：${details.mode === 'single' ? '仅此轮' : details.mode === 'truncate' ? '此轮及之后' : details.mode}`);
+  if (details.fromPath && details.toPath) parts.push(`路径：${details.fromPath} → ${details.toPath}`);
   if (details.originalOperationId) parts.push(`来源操作：${String(details.originalOperationId).slice(0, 8)}`);
   return parts.join(' · ');
 }
@@ -722,6 +725,7 @@ function renderDirectories() {
     if (state.selectedDirectory !== '*' && !matchingDirectory) state.selectedDirectory = '*';
     $('directoryFilter').value = state.selectedDirectory;
     $('sessionFilter').disabled = !state.selectedDirectory;
+    updateProjectPathButton();
     return;
   }
   const unknownCount = state.sessions.filter((session) => !session.projectPath).length;
@@ -750,6 +754,18 @@ function renderDirectories() {
   if (!available) state.selectedDirectory = '*';
   $('directoryFilter').value = state.selectedDirectory;
   $('sessionFilter').disabled = !state.selectedDirectory;
+  updateProjectPathButton();
+}
+
+function selectedProjectDirectory() {
+  const value = state.selectedDirectory;
+  if (!value || value === '*' || value.startsWith('__')) return null;
+  return value;
+}
+
+function updateProjectPathButton() {
+  const button = $('projectPathButton');
+  if (button) button.disabled = !selectedProjectDirectory();
 }
 
 function claudeTitleSourceLabel(source) {
@@ -1844,6 +1860,92 @@ async function applyCleanup() {
   setAlert('清理完成，原始 rollout 已备份；如存在分页历史，也已保存安全副本。重新打开目标会话时 Codex 会重建历史。', 'success');
 }
 
+function closeProjectPathDialog() {
+  state.projectPathPlan = null;
+  $('projectPathConfirmation').value = '';
+  $('applyProjectPathButton').disabled = true;
+  $('projectPathPlan').classList.add('hidden');
+  $('projectPathDialog').close();
+}
+
+function openProjectPathDialog() {
+  const fromPath = selectedProjectDirectory();
+  if (!fromPath) return;
+  state.projectPathPlan = null;
+  $('projectPathFrom').value = fromPath;
+  $('projectPathTo').value = '';
+  $('projectPathConfirmation').value = '';
+  $('applyProjectPathButton').disabled = true;
+  $('projectPathPlan').classList.add('hidden');
+  $('projectPathIntro').textContent = isClaudePlatform()
+    ? '实际文件夹改名后，把该目录下的 Claude Code 会话和项目存储迁移到新路径；不会移动项目文件。'
+    : '实际文件夹改名后，批量更新该目录下 Codex 会话的 rollout、SQLite 和索引；不会移动项目文件。';
+  $('projectPathDialog').showModal();
+  $('projectPathTo').focus();
+}
+
+function renderProjectPathPlan(plan) {
+  state.projectPathPlan = plan;
+  const claude = plan.platform === 'claude';
+  $('projectPathSessions').textContent = String(plan.summary.sessions || 0);
+  $('projectPathFiles').textContent = String(claude ? plan.summary.mainFiles : plan.summary.rolloutFiles);
+  $('projectPathSecondaryLabel').textContent = claude ? '侧边数据目录' : 'SQLite 记录';
+  $('projectPathSecondary').textContent = String(claude ? plan.summary.sidecarDirectories : plan.summary.sqliteRows);
+  $('projectPathIndexes').textContent = String(claude ? plan.summary.indexes : plan.summary.indexRows);
+  const warnings = [];
+  if (plan.blockedByRunningCodex) warnings.push('检测到 Codex 正在运行。完全退出 Codex 后重新预览。');
+  if (plan.summary.conflicts) warnings.push(`新路径的 Claude 项目存储存在 ${plan.summary.conflicts} 个冲突，当前不会覆盖。`);
+  if (!plan.summary.sessions) warnings.push('旧路径下没有找到可迁移的会话。');
+  if (claude && plan.canApply) warnings.push('执行前请退出相关 Claude Code 会话；迁移后重新从新项目目录打开 Claude Code。');
+  $('projectPathWarning').textContent = warnings.join(' ');
+  $('projectPathWarning').classList.toggle('hidden', warnings.length === 0);
+  $('projectPathConfirmation').value = '';
+  $('applyProjectPathButton').disabled = true;
+  $('projectPathPlan').classList.remove('hidden');
+}
+
+async function previewProjectPathMigration() {
+  setAlert('');
+  const fromPath = $('projectPathFrom').value;
+  const toPath = $('projectPathTo').value.trim();
+  if (!toPath) throw new Error('请输入已经改名后的新项目路径。');
+  $('previewProjectPathButton').disabled = true;
+  try {
+    const plan = await api('/api/project-path-migrations/preview', {
+      method: 'POST',
+      body: JSON.stringify({ platform: state.platform, fromPath, toPath }),
+    });
+    renderProjectPathPlan(plan);
+  } finally {
+    $('previewProjectPathButton').disabled = false;
+  }
+}
+
+async function applyProjectPathMigration() {
+  const plan = state.projectPathPlan;
+  if (!plan) return;
+  const body = await api('/api/project-path-migrations/apply', {
+    method: 'POST',
+    body: JSON.stringify({
+      platform: plan.platform,
+      fromPath: plan.fromPath,
+      toPath: plan.toPath,
+      planToken: plan.planToken,
+      confirmation: $('projectPathConfirmation').value,
+    }),
+  });
+  const target = plan.toPath;
+  closeProjectPathDialog();
+  state.selectedDirectory = target;
+  await loadSessions();
+  setAlert(
+    plan.platform === 'claude'
+      ? `已迁移 ${body.preview.sessionIds.length} 个 Claude Code 会话。请从新项目目录重新打开 Claude Code。`
+      : `已迁移 ${body.preview.sessionIds.length} 个 Codex 会话。重新打开新项目目录后，历史会话会归入新路径。`,
+    'success',
+  );
+}
+
 function renderVisibilityPlan(plan) {
   state.visibilityPlan = plan;
   $('visibilityProvider').textContent = plan.targetProvider || '-';
@@ -2775,6 +2877,20 @@ $('sessionHealthActions').addEventListener('click', (event) => {
   runHealthAction(button.dataset.healthAction).catch((error) => setAlert(error.message));
 });
 $('visibilityButton').addEventListener('click', () => previewVisibilityRepair().catch((error) => setAlert(error.message)));
+$('projectPathButton').addEventListener('click', openProjectPathDialog);
+$('closeProjectPathButton').addEventListener('click', closeProjectPathDialog);
+$('previewProjectPathButton').addEventListener('click', () => previewProjectPathMigration().catch((error) => setAlert(error.message)));
+$('projectPathTo').addEventListener('input', () => {
+  state.projectPathPlan = null;
+  $('projectPathPlan').classList.add('hidden');
+});
+$('projectPathConfirmation').addEventListener('input', () => {
+  $('applyProjectPathButton').disabled = !(
+    state.projectPathPlan?.canApply
+    && $('projectPathConfirmation').value === 'MIGRATE'
+  );
+});
+$('applyProjectPathButton').addEventListener('click', () => applyProjectPathMigration().catch((error) => setAlert(error.message)));
 $('closeVisibilityButton').addEventListener('click', () => {
   state.visibilityPlan = null;
   $('visibilityPanel').classList.add('hidden');
@@ -2945,6 +3061,7 @@ $('directoryFilter').addEventListener('change', () => {
   state.turns = [];
   $('sessionFilter').value = '';
   $('sessionFilter').disabled = !state.selectedDirectory;
+  updateProjectPathButton();
   resetTurnWorkspace();
   $('turns').className = 'turns-empty';
   $('turns').textContent = state.selectedDirectory ? '请选择一个会话。' : '请先选择项目目录。';

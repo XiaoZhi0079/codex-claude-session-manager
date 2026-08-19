@@ -24,6 +24,7 @@ import { readFullContextExport, readFullContextView } from './context-view.mjs';
 import {
   applyCodexVisibilityRepair,
   buildSessionRegistry,
+  detectRunningCodexProcesses,
   previewCodexVisibilityRepair,
 } from './registry.mjs';
 import {
@@ -84,6 +85,13 @@ import {
   previewClaudeMessageEdits,
   restoreClaudeMessageEdit,
 } from './claude-message-edit.mjs';
+import {
+  applyClaudeProjectPathMigration,
+  applyCodexProjectPathMigration,
+  previewClaudeProjectPathMigration,
+  previewCodexProjectPathMigration,
+  restoreProjectPathMigration,
+} from './project-path-migration.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -104,6 +112,27 @@ function sendJson(response, status, body) {
 
 function isClaudeOperation(kind) {
   return String(kind || '').startsWith('claude_');
+}
+
+function publicProjectPathPlan(plan) {
+  return {
+    platform: plan.platform,
+    fromPath: plan.fromPath,
+    toPath: plan.toPath,
+    sessionIds: plan.sessionIds,
+    sessions: plan.sessions || [],
+    summary: plan.summary,
+    conflicts: plan.conflicts || [],
+    blockedByRunningCodex: Boolean(plan.blockedByRunningCodex),
+    codexProcessCheck: plan.codexProcessCheck || null,
+    canApply: plan.canApply,
+    planToken: plan.planToken,
+  };
+}
+
+function projectPathPlatform(value) {
+  if (value === 'codex' || value === 'claude') return value;
+  throw new CleanerError('INVALID_PROJECT_PATH_PLATFORM', 'Project path migration platform must be codex or claude.', 400);
 }
 
 function sendDownload(response, download) {
@@ -390,6 +419,19 @@ export function createCleanerServer(options = {}) {
         expectedCurrentHash: undo.expectedCurrentHash,
       });
     }
+    if (undo.type === 'project_path_migration_restore') {
+      if (undo.platform === 'codex') {
+        const check = options.codexProcessCheck || await detectRunningCodexProcesses();
+        if (check.available && check.processes.length) {
+          throw new CleanerError('CODEX_STILL_RUNNING', 'Close every Codex window and terminal session before restoring a project path migration.', 409);
+        }
+      }
+      return restoreProjectPathMigration(
+        undo.platform,
+        undo.platform === 'claude' ? claudeHome : codexHome,
+        { backupRoot: undo.backupRoot, backupDir: undo.backupDir },
+      );
+    }
     throw new CleanerError('UNDO_NOT_SUPPORTED', 'The latest operation does not have a supported restore point.', 409);
   }
 
@@ -476,11 +518,89 @@ export function createCleanerServer(options = {}) {
           sessionIds: original.sessionIds,
           details: { originalOperationId: original.id },
         }, () => executeUndo(original.undo), (undoResult) => ({
-          result: { originalOperationId: original.id, restartRequired: Boolean(undoResult.restartRequired) },
+          result: {
+            originalOperationId: original.id,
+            restartRequired: Boolean(undoResult.restartRequired),
+            claudeRestartRecommended: Boolean(undoResult.claudeRestartRecommended),
+          },
         }));
         await operationHistory.markUndone(original.id, result.operationId);
         registryCache = null;
+        claudeRegistryCache = null;
         sendJson(response, 200, result);
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/project-path-migrations/preview' && request.method === 'POST') {
+        const body = await readJsonRequest(request);
+        const claude = projectPathPlatform(body.platform) === 'claude';
+        const plan = claude
+          ? await previewClaudeProjectPathMigration(claudeHome, {
+            fromPath: body.fromPath,
+            toPath: body.toPath,
+            backupRoot: claudeTurnBackupRoot,
+          })
+          : await previewCodexProjectPathMigration(codexHome, {
+            fromPath: body.fromPath,
+            toPath: body.toPath,
+            backupRoot,
+            env,
+            codexProcessCheck: options.codexProcessCheck,
+          });
+        sendJson(response, 200, publicProjectPathPlan(plan));
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/project-path-migrations/apply' && request.method === 'POST') {
+        const body = await readJsonRequest(request);
+        if (body.confirmation !== 'MIGRATE') {
+          throw new CleanerError('PROJECT_PATH_MIGRATION_CONFIRMATION_REQUIRED', 'Type MIGRATE to migrate the selected project path.', 400);
+        }
+        const claude = projectPathPlatform(body.platform) === 'claude';
+        const preview = claude
+          ? await previewClaudeProjectPathMigration(claudeHome, { fromPath: body.fromPath, toPath: body.toPath, backupRoot: claudeTurnBackupRoot })
+          : await previewCodexProjectPathMigration(codexHome, { fromPath: body.fromPath, toPath: body.toPath, backupRoot, env, codexProcessCheck: options.codexProcessCheck });
+        const result = await executeRecordedOperation({
+          kind: claude ? 'claude_project_path_migration' : 'project_path_migration',
+          label: claude ? '迁移 Claude Code 项目路径' : '迁移 Codex 项目路径',
+          sessionIds: preview.sessionIds,
+          details: { fromPath: preview.fromPath, toPath: preview.toPath },
+        }, () => (claude
+          ? applyClaudeProjectPathMigration(claudeHome, {
+            fromPath: body.fromPath,
+            toPath: body.toPath,
+            planToken: body.planToken,
+            backupRoot: claudeTurnBackupRoot,
+          })
+          : applyCodexProjectPathMigration(codexHome, {
+            fromPath: body.fromPath,
+            toPath: body.toPath,
+            planToken: body.planToken,
+            backupRoot,
+            env,
+            codexProcessCheck: options.codexProcessCheck,
+          })), (value) => ({
+          result: {
+            count: value.preview.sessionIds.length,
+            fromPath: value.preview.fromPath,
+            toPath: value.preview.toPath,
+            restartRequired: Boolean(value.restartRequired),
+            claudeRestartRecommended: Boolean(value.claudeRestartRecommended),
+          },
+          undo: {
+            type: 'project_path_migration_restore',
+            platform: claude ? 'claude' : 'codex',
+            backupRoot: claude ? claudeTurnBackupRoot : backupRoot,
+            backupDir: value.backup.backupDir,
+          },
+        }));
+        registryCache = null;
+        claudeRegistryCache = null;
+        sendJson(response, 200, {
+          ...result,
+          preview: publicProjectPathPlan(result.preview),
+          backup: result.backup ? { backupDir: result.backup.backupDir } : null,
+        });
         return;
       }
 

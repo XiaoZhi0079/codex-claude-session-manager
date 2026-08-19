@@ -64,6 +64,15 @@ Claude Code 轮次删除：
 
 Codex 编辑与清理预览会返回 `targetSessionLock`。若 `activeSessionIds` 非空，必须只关闭这些目标会话后重新预览；其他 Codex 窗口可以继续运行。成功写入会返回 `threadHistory`，其中包含写前状态、数据库备份和仅针对目标会话的投影失效统计。
 
+## 项目路径迁移
+
+| 方法 | 路径 | 用途 / 确认词 |
+|---|---|---|
+| POST | `/api/project-path-migrations/preview` | 按 `platform`、`fromPath` 和 `toPath` 预览 Codex 或 Claude Code 路径迁移 |
+| POST | `/api/project-path-migrations/apply` | 备份并迁移；确认词 `MIGRATE` |
+
+目标项目目录必须已经存在。Codex 迁移要求完全退出 Codex，并更新 rollout、SQLite 与兼容索引；Claude Code 迁移会更新主 JSONL、项目索引，并把会话主文件和侧边目录移入新路径对应的项目存储。成功操作可从操作历史回退。
+
 ## 可见性
 
 | 方法 | 路径 | 确认词 |
