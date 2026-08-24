@@ -73,6 +73,17 @@ Codex 编辑与清理预览会返回 `targetSessionLock`。若 `activeSessionIds
 
 目标项目目录必须已经存在。Codex 迁移要求完全退出 Codex，并更新 rollout、SQLite 与兼容索引；Claude Code 迁移会更新主 JSONL、项目索引，并把会话主文件和侧边目录移入新路径对应的项目存储。成功操作可从操作历史回退。
 
+## Codex 跨电脑会话迁移
+
+| 方法 | 路径 | 用途 / 确认词 |
+|---|---|---|
+| POST | `/api/codex-session-transfer/export` | 根据 `sessionIds` 下载二进制 `.ccsm` 包 |
+| POST | `/api/codex-session-transfer/import-upload` | 以 `application/octet-stream` 上传并完整校验迁移包 |
+| POST | `/api/codex-session-transfer/import-preview` | 根据 `transferId`、`pathMappings` 和 `mode` 校验目标项目与冲突 |
+| POST | `/api/codex-session-transfer/import-apply` | 重新校验并导入；确认词 `IMPORT` |
+
+`import-upload` 会为目标机上仍然存在的源项目路径返回 `suggestedTargetPath`。`mode=resume` 要求源、目标项目指纹一致，写入 rollout、当前 `state_N.sqlite` 和兼容标题索引，并要求完全退出 Codex。预览结果分别提供 `projectMappingsRequired`（目录未映射）和 `projectContentMismatches`（目录内容不同），避免将两种原因混为一谈。`mode=history` 只写入 rollout，允许项目不一致，不会建立 Codex 可续聊索引。同 ID 同正文跳过，同 ID 不同正文作为硬冲突拒绝覆盖。成功导入会记录 `codex_session_import_restore` 回退描述；若导入后的正文已经变化，自动回退会被拒绝。
+
 ## 可见性
 
 | 方法 | 路径 | 确认词 |

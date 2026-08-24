@@ -23,6 +23,8 @@ Codex & Claude Code Session Manager 是本地单进程工具：Node.js HTTP 服�
 | `src/session-delete.mjs` | 整会话预览、单条/批量删除、删除备份管理和恢复 |
 | `src/operation-backup.mjs` | 轮次快照与系统备份的发现、删除、预览和恢复 |
 | `src/operation-history.mjs` | 追加式操作事件、状态折叠、中断识别和撤销资格 |
+| `src/codex-session-transfer.mjs` | `.ccsm` 迁移包、项目内容指纹、跨机器导入规划、目标索引重建与安全回退 |
+| `src/instance-lock.mjs` | 按 Codex/Claude 数据目录建立跨端口单实例锁，并清理崩溃遗留的失效锁 |
 | `public/index.html` | 当前正式页面结构 |
 | `public/app.js` | 页面状态、API 调用和交互逻辑 |
 | `public/styles.css`、`public/redesign.css` | 基础样式和当前视觉系统 |

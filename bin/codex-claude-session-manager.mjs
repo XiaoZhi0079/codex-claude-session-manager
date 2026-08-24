@@ -55,14 +55,20 @@ async function main() {
 
   const codexHome = options.codexHome || getDefaultCodexHome();
   const claudeHome = options.claudeHome || getDefaultClaudeHome();
-  const { server, url } = await startCleanerServer({ ...options, codexHome, claudeHome });
+  const { server, url, releaseInstanceLocks } = await startCleanerServer({ ...options, codexHome, claudeHome });
   process.stdout.write(`Codex & Claude Code Session Manager running at ${url}\n`);
   process.stdout.write(`Codex data: ${codexHome}\n`);
   process.stdout.write(`Claude Code data: ${claudeHome}\n`);
   process.stdout.write('Press Ctrl+C to stop.\n');
 
+  let shuttingDown = false;
   const shutdown = () => {
-    server.close(() => process.exit(0));
+    if (shuttingDown) return;
+    shuttingDown = true;
+    server.close(async () => {
+      await releaseInstanceLocks();
+      process.exit(0);
+    });
   };
   process.once('SIGINT', shutdown);
   process.once('SIGTERM', shutdown);
@@ -74,7 +80,11 @@ try {
   if (error?.code === 'EACCES') {
     process.stderr.write('The selected port is blocked by Windows. Use --port or CODEX_CLAUDE_SESSION_MANAGER_PORT.\n');
   } else if (error?.code === 'EADDRINUSE') {
-    process.stderr.write('The selected port is already in use. Use --port or CODEX_CLAUDE_SESSION_MANAGER_PORT.\n');
+    process.stderr.write('The selected port is already in use. The session manager will not switch to another port or start a second instance.\n');
+  } else if (error?.code === 'INSTANCE_ALREADY_RUNNING') {
+    const location = error.details?.dataPath || 'the selected session data directory';
+    const port = error.details?.port;
+    process.stderr.write(`Another session-manager instance is already using ${location}.${port ? ` Open http://127.0.0.1:${port}` : ''}\n`);
   } else {
     process.stderr.write(`${error?.message || error}\n`);
   }

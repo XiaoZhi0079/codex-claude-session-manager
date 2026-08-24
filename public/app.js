@@ -23,6 +23,8 @@ const state = {
   registrySummary: null,
   visibilityPlan: null,
   projectPathPlan: null,
+  transferUpload: null,
+  transferImportPlan: null,
   healthSessionId: null,
   healthDiagnosis: null,
   sessionDeletePlan: null,
@@ -96,6 +98,8 @@ function configurePlatformUI() {
   $('claudePlatformButton').setAttribute('aria-pressed', String(claude));
   $('operationHistoryButton').classList.remove('hidden');
   $('backupManagerButton').classList.remove('hidden');
+  $('sessionTransferButton').classList.toggle('hidden', claude);
+  $('sessionImportButton').classList.toggle('hidden', claude);
   $('sessionCommandbar').classList.remove('hidden');
   $('visibilityButton').classList.toggle('hidden', claude);
   updateProjectPathButton();
@@ -379,7 +383,17 @@ function initTheme() {
 }
 
 function setAlert(message, type = 'error') {
-  const alert = $('alert');
+  const openDialog = [...document.querySelectorAll('dialog[open]')].at(-1);
+  let alert = $('alert');
+  if (openDialog) {
+    alert = openDialog.querySelector('.dialog-runtime-alert');
+    if (!alert) {
+      alert = document.createElement('div');
+      alert.className = 'alert dialog-runtime-alert hidden';
+      alert.setAttribute('role', 'alert');
+      (openDialog.querySelector('.session-delete-card, form, .metrics-body') || openDialog).prepend(alert);
+    }
+  }
   if (state.alertTimer) {
     clearTimeout(state.alertTimer);
     state.alertTimer = null;
@@ -397,6 +411,14 @@ function setAlert(message, type = 'error') {
   }, type === 'success' ? 6_000 : 8_000);
 }
 
+function apiError(body, status) {
+  const error = new Error(body?.error?.message || `Request failed: ${status}`);
+  error.code = body?.error?.code || null;
+  error.details = body?.error?.details || {};
+  error.status = status;
+  return error;
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
@@ -407,7 +429,7 @@ async function api(path, options = {}) {
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(body?.error?.message || `Request failed: ${response.status}`);
+    throw apiError(body, response.status);
   }
   return body;
 }
@@ -420,7 +442,7 @@ async function apiDownload(path, body) {
   });
   if (!response.ok) {
     const errorBody = await response.json().catch(() => ({}));
-    throw new Error(errorBody?.error?.message || `Request failed: ${response.status}`);
+    throw apiError(errorBody, response.status);
   }
   const disposition = response.headers.get('content-disposition') || '';
   const fileName = disposition.match(/filename="?([^";]+)"?/i)?.[1] || 'codex-context.txt';
@@ -719,6 +741,7 @@ function updateBatchControls() {
   $('selectVisibleSessions').checked = visible.length > 0 && selectedVisible === visible.length;
   $('selectVisibleSessions').indeterminate = selectedVisible > 0 && selectedVisible < visible.length;
   $('selectVisibleSessions').disabled = visible.length === 0;
+  if ($('sessionTransferDialog')?.open) updateTransferExportSummary();
 }
 
 function renderDirectories() {
@@ -1990,6 +2013,280 @@ async function applyProjectPathMigration() {
   );
 }
 
+function transferSelectedSessions() {
+  const selected = [...state.selectedSessionIds]
+    .map((id) => state.sessions.find((session) => session.id === id))
+    .filter((session) => session?.hasRollout);
+  if (!selected.length && state.selectedSession?.hasRollout) return [state.selectedSession];
+  return selected;
+}
+
+function updateTransferExportSummary() {
+  const sessions = transferSelectedSessions();
+  $('transferExportSummary').textContent = sessions.length
+    ? `将导出 ${sessions.length} 个正式会话。项目文件不会被放入迁移包。`
+    : '请先在会话列表勾选要迁移的 Codex 会话，或打开一个存在正文的会话。';
+  $('exportSessionsButton').disabled = sessions.length === 0;
+}
+
+function clearTransferFeedback(id) {
+  const feedback = $(id);
+  feedback.innerHTML = '';
+  feedback.classList.add('hidden');
+  feedback.classList.remove('success');
+}
+
+function showTransferFeedback(id, { title, message, paths = [], success = false }) {
+  const feedback = $(id);
+  feedback.innerHTML = `
+    <strong>${escapeHtml(title)}</strong>
+    <span>${escapeHtml(message)}</span>
+    ${paths.filter(Boolean).map((value) => `<code>${escapeHtml(displayPath(value))}</code>`).join('')}
+  `;
+  feedback.classList.toggle('success', success);
+  feedback.classList.remove('hidden');
+  feedback.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  feedback.focus({ preventScroll: true });
+}
+
+function showTransferExportError(error, sessions) {
+  const failedId = error.details?.sessionId;
+  const failed = sessions.find((session) => session.id === failedId);
+  const subject = failed?.title || sessions.map((session) => session.title || session.id).join('、') || '所选会话';
+  const messages = {
+    UNSAFE_ROLLOUT_PATH: '会话记录的 rollout 路径未被识别为当前 Codex 数据目录中的正式正文。请核对下面的正文路径和 Codex 数据目录。',
+    SESSION_NOT_EXPORTABLE: '所选内容中存在没有正式 rollout 正文的会话，当前不能导出。',
+    SESSION_ROLLOUT_MISMATCH: '会话 ID 与 rollout 正文中的 ID 不一致，为避免导出错误会话，操作已停止。',
+    ROLLOUT_TOO_LARGE: '该会话正文超过单会话 512 MB 的迁移限制。',
+    TRANSFER_PACKAGE_TOO_LARGE: '生成的迁移包超过 1 GB 限制。',
+  };
+  showTransferFeedback('transferExportFeedback', {
+    title: `无法导出：${subject}`,
+    message: messages[error.code] || `导出失败：${error.message}`,
+    paths: [error.details?.rolloutPath, error.details?.codexHome],
+  });
+}
+
+function showTransferImportError(error) {
+  const messages = {
+    INVALID_TRANSFER_PACKAGE: '所选文件不是有效的 .ccsm 会话迁移包。',
+    UNSUPPORTED_TRANSFER_FORMAT: '该迁移包来自不受支持的格式版本，请使用最新版工具重新导出。',
+    TRANSFER_CHECKSUM_MISMATCH: '迁移包中的会话正文校验失败，文件可能不完整或已被修改。',
+    CORRUPT_TRANSFER_ROLLOUT: '迁移包中的会话正文无法解析，不能安全导入。',
+    INVALID_PROJECT_FINGERPRINT: '迁移包中的项目指纹元数据无效。',
+    TRANSFER_PACKAGE_TOO_LARGE: '迁移包超过 1 GB 限制。',
+    ROLLOUT_TOO_LARGE: '迁移包中有单个会话正文超过 512 MB 限制。',
+    TRANSFER_NOT_FOUND: '服务器已找不到刚才上传的迁移包，请重新选择文件。',
+    STALE_IMPORT_PLAN: '预览后迁移包、项目文件或 Codex 状态发生了变化，请重新预览。',
+    SESSION_IMPORT_BLOCKED: '当前导入仍有项目、正文冲突或会话占用问题，请按预览中的说明处理。',
+    CODEX_STILL_RUNNING: 'Codex 仍在运行。请完全退出 Codex 后再应用可续聊导入。',
+    UNSUPPORTED_CODEX_SCHEMA: '当前 Codex 数据库版本包含工具尚不支持的必填字段，已停止写入。',
+  };
+  showTransferFeedback('transferImportFeedback', {
+    title: '无法继续导入',
+    message: messages[error.code] || error.message || '迁移包导入失败。',
+    paths: [error.details?.projectPath, error.details?.sourcePath, error.details?.targetPath],
+  });
+}
+
+function openSessionTransfer() {
+  if (isClaudePlatform()) return;
+  updateTransferExportSummary();
+  clearTransferFeedback('transferExportFeedback');
+  $('sessionTransferDialog').showModal();
+}
+
+function closeSessionTransfer() {
+  $('sessionTransferDialog').close();
+}
+
+function openSessionImport() {
+  clearTransferFeedback('transferImportFeedback');
+  $('sessionImportDialog').showModal();
+}
+
+function closeSessionImport() {
+  $('sessionImportDialog').close();
+}
+
+async function exportSelectedSessions() {
+  const sessions = transferSelectedSessions();
+  clearTransferFeedback('transferExportFeedback');
+  if (!sessions.length) {
+    showTransferFeedback('transferExportFeedback', {
+      title: '没有可导出的会话',
+      message: '请先勾选至少一个存在正式 rollout 正文的 Codex 会话。',
+    });
+    return;
+  }
+  const button = $('exportSessionsButton');
+  button.disabled = true;
+  button.textContent = '正在校验并打包…';
+  try {
+    const result = await apiDownload('/api/codex-session-transfer/export', {
+      sessionIds: sessions.map((session) => session.id),
+    });
+    showTransferFeedback('transferExportFeedback', {
+      title: '会话导出完成',
+      message: `已导出 ${result.recordCount || sessions.length} 个会话：${result.fileName}`,
+      success: true,
+    });
+  } catch (error) {
+    showTransferExportError(error, sessions);
+  } finally {
+    button.textContent = '导出已选会话';
+    updateTransferExportSummary();
+  }
+}
+
+function invalidateTransferPlan() {
+  state.transferImportPlan = null;
+  $('transferImportPlan').classList.add('hidden');
+  $('transferImportConfirmation').value = '';
+  $('applySessionImportButton').disabled = true;
+}
+
+function fingerprintDescription(fingerprint) {
+  if (!fingerprint?.available) return `导出时无法生成指纹（${fingerprint?.reason || '未知原因'}）`;
+  const git = fingerprint.kind === 'git' ? `Git ${String(fingerprint.head || '').slice(0, 10)} · ` : '';
+  return `${git}${fingerprint.files || 0} 个文件 · ${formatBytes(fingerprint.bytes)}`;
+}
+
+function renderTransferMappings(upload) {
+  const projects = (upload.projects || []).filter((project) => project.sourcePath);
+  const container = $('transferMappings');
+  if (!projects.length) {
+    container.innerHTML = '<div class="mode-warning">包内会话没有项目目录；可以导入，但续聊前请自行确认工作目录。</div>';
+    container.classList.remove('hidden');
+    return;
+  }
+  container.innerHTML = `
+    <strong>映射到本机项目目录</strong>
+    <span class="muted">迁移包不包含项目文件。选择目录后会核对有效文件内容，不比较依赖、缓存和构建产物。</span>
+    ${projects.map((project, index) => `
+      <label class="path-migration-field transfer-mapping" data-transfer-source="${escapeHtml(project.sourcePath)}">
+        <span>${escapeHtml(displayPath(project.sourcePath))} · ${project.sessionCount} 个会话<br><small>${escapeHtml(fingerprintDescription(project.fingerprint))}</small></span>
+        <div class="path-picker-row">
+          <input data-transfer-target="${index}" value="${escapeHtml(project.suggestedTargetPath || '')}" placeholder="选择本机对应项目目录" spellcheck="false">
+          <button type="button" class="btn btn-sm" data-transfer-browse="${index}">浏览…</button>
+        </div>
+      </label>
+    `).join('')}
+  `;
+  container.classList.remove('hidden');
+}
+
+async function uploadTransferPackage(file) {
+  clearTransferFeedback('transferImportFeedback');
+  invalidateTransferPlan();
+  state.transferUpload = null;
+  $('previewSessionImportButton').disabled = true;
+  $('transferUploadStatus').textContent = '正在校验迁移包正文和校验值…';
+  const response = await fetch('/api/codex-session-transfer/import-upload', {
+    method: 'POST',
+    headers: { 'content-type': 'application/octet-stream' },
+    body: file,
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw apiError(body, response.status);
+  state.transferUpload = body;
+  renderTransferMappings(body);
+  $('transferMode').classList.remove('hidden');
+  const suggested = (body.projects || []).filter((project) => project.suggestedTargetPath).length;
+  $('transferUploadStatus').textContent = suggested
+    ? `迁移包校验通过：${body.sessions.length} 个会话；已识别 ${suggested} 个本机原项目目录，可直接预览或修改映射。`
+    : `迁移包校验通过：${body.sessions.length} 个会话。请映射项目目录后预览。`;
+  $('previewSessionImportButton').disabled = false;
+}
+
+function transferPathMappings() {
+  return [...document.querySelectorAll('.transfer-mapping')].map((label) => ({
+    sourcePath: label.dataset.transferSource,
+    targetPath: label.querySelector('[data-transfer-target]').value.trim(),
+  })).filter((item) => item.targetPath);
+}
+
+function transferMode() {
+  return document.querySelector('input[name="transferMode"]:checked')?.value || 'resume';
+}
+
+async function browseTransferProject(button) {
+  const label = button.closest('.transfer-mapping');
+  const input = label.querySelector('[data-transfer-target]');
+  const result = await api('/api/system/select-directory', {
+    method: 'POST',
+    body: JSON.stringify({ initialPath: input.value.trim() || label.dataset.transferSource }),
+  });
+  if (!result.canceled && result.path) {
+    input.value = result.path;
+    invalidateTransferPlan();
+  }
+}
+
+function renderTransferImportPlan(plan) {
+  state.transferImportPlan = plan;
+  $('transferPlanSessions').textContent = String(plan.summary.sessions);
+  $('transferPlanImportable').textContent = String(plan.summary.importable);
+  $('transferPlanExisting').textContent = String(plan.summary.alreadyPresent);
+  $('transferPlanConflicts').textContent = String(plan.summary.conflicts);
+  $('transferPlanMappingsRequired').textContent = String(plan.summary.projectMappingsRequired || 0);
+  $('transferPlanMismatches').textContent = String(plan.summary.projectContentMismatches || 0);
+  const warnings = [];
+  if (plan.summary.conflicts) warnings.push('目标电脑存在 ID 相同但正文不同的会话，工具不会覆盖。');
+  if (plan.mode === 'resume' && plan.summary.projectMappingsRequired) warnings.push('还有项目目录尚未映射，请点击“浏览…”选择本机对应目录。');
+  if (plan.mode === 'resume' && plan.summary.projectContentMismatches) warnings.push('所选目录的有效文件内容与导出时不同，不能恢复续聊。请选对目录、同步项目文件，或改为“仅作为历史记录导入”。');
+  if (plan.targetSessionLock?.activeSessionIds?.length) warnings.push('目标会话正在被 Codex 使用，请先关闭。');
+  if (plan.mode === 'resume' && plan.canApply) warnings.push('应用前请完全退出 Codex；导入后重新启动即可看到会话。');
+  if (plan.mode === 'history') warnings.push('历史模式只写入正文，不加入 Codex 会话索引；可在本工具中查看，之后项目匹配时再重新导入为可续聊会话。');
+  $('transferPlanWarning').textContent = warnings.join(' ');
+  $('transferPlanWarning').classList.toggle('hidden', warnings.length === 0);
+  $('transferImportConfirmation').value = '';
+  $('applySessionImportButton').disabled = true;
+  $('transferImportPlan').classList.remove('hidden');
+}
+
+async function previewSessionImport() {
+  clearTransferFeedback('transferImportFeedback');
+  if (!state.transferUpload) throw new Error('请先选择并校验迁移包。');
+  const button = $('previewSessionImportButton');
+  button.disabled = true;
+  try {
+    const plan = await api('/api/codex-session-transfer/import-preview', {
+      method: 'POST',
+      body: JSON.stringify({
+        transferId: state.transferUpload.transferId,
+        pathMappings: transferPathMappings(),
+        mode: transferMode(),
+      }),
+    });
+    renderTransferImportPlan(plan);
+  } finally { button.disabled = false; }
+}
+
+async function applySessionImport() {
+  clearTransferFeedback('transferImportFeedback');
+  const plan = state.transferImportPlan;
+  if (!plan) return;
+  const result = await api('/api/codex-session-transfer/import-apply', {
+    method: 'POST',
+    body: JSON.stringify({
+      transferId: state.transferUpload.transferId,
+      pathMappings: transferPathMappings(),
+      mode: plan.mode,
+      planToken: plan.planToken,
+      confirmation: $('transferImportConfirmation').value,
+    }),
+  });
+  closeSessionImport();
+  try {
+    await loadSessions();
+  } catch (error) {
+    setAlert(`会话已经导入，但列表刷新失败：${error.message}`);
+    return;
+  }
+  setAlert(`已导入 ${result.preview.summary.importable} 个 Codex 会话。该操作可在“操作历史”中直接回退。`, 'success');
+}
+
 function renderVisibilityPlan(plan) {
   state.visibilityPlan = plan;
   $('visibilityProvider').textContent = plan.targetProvider || '-';
@@ -2922,6 +3219,30 @@ $('sessionHealthActions').addEventListener('click', (event) => {
 });
 $('visibilityButton').addEventListener('click', () => previewVisibilityRepair().catch((error) => setAlert(error.message)));
 $('projectPathButton').addEventListener('click', openProjectPathDialog);
+$('sessionTransferButton').addEventListener('click', openSessionTransfer);
+$('sessionImportButton').addEventListener('click', openSessionImport);
+$('closeSessionTransferButton').addEventListener('click', closeSessionTransfer);
+$('closeSessionImportButton').addEventListener('click', closeSessionImport);
+$('exportSessionsButton').addEventListener('click', () => exportSelectedSessions());
+$('transferPackageFile').addEventListener('change', (event) => {
+  const [file] = event.target.files || [];
+  if (file) uploadTransferPackage(file).catch((error) => {
+    $('transferUploadStatus').textContent = '迁移包校验失败，请查看下方说明。';
+    showTransferImportError(error);
+  });
+});
+$('transferMappings').addEventListener('click', (event) => {
+  const button = event.target.closest('[data-transfer-browse]');
+  if (button) browseTransferProject(button).catch(showTransferImportError);
+});
+$('transferMappings').addEventListener('input', invalidateTransferPlan);
+$('transferMode').addEventListener('change', invalidateTransferPlan);
+$('previewSessionImportButton').addEventListener('click', () => previewSessionImport().catch(showTransferImportError));
+$('transferImportConfirmation').addEventListener('input', () => {
+  $('applySessionImportButton').disabled = !state.transferImportPlan?.canApply
+    || $('transferImportConfirmation').value !== 'IMPORT';
+});
+$('applySessionImportButton').addEventListener('click', () => applySessionImport().catch(showTransferImportError));
 $('closeProjectPathButton').addEventListener('click', closeProjectPathDialog);
 $('browseProjectPathButton').addEventListener('click', () => browseProjectPath().catch((error) => setAlert(error.message)));
 $('previewProjectPathButton').addEventListener('click', () => previewProjectPathMigration().catch((error) => setAlert(error.message)));

@@ -32,6 +32,7 @@
         </div>
         <button id="operationHistoryButton" type="button" class="btn btn-sm">操作历史</button>
         <button id="backupManagerButton" type="button" class="btn btn-sm">备份管理</button>
+        <button id="sessionImportButton" type="button" class="btn btn-sm outline-accent">导入会话</button>
         <button id="refreshButton" type="button" class="btn btn-sm" title="重新扫描本地会话、索引和备份">刷新</button>
         <button id="themeButton" type="button" class="btn btn-sm icon" title="切换明暗主题" aria-label="切换明暗主题">
           <svg id="themeIcon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
@@ -230,6 +231,91 @@
         </form>
       </dialog>
 
+      <dialog id="sessionTransferDialog" class="session-delete-dialog session-transfer-dialog">
+        <div class="session-delete-card">
+          <div class="visibility-head">
+            <div>
+              <h2>导出 Codex 会话</h2>
+              <p>迁移包只包含正式会话正文和校验元数据，不包含账号、配置、源电脑数据库或项目文件。</p>
+            </div>
+            <button id="closeSessionTransferButton" type="button">关闭</button>
+          </div>
+          <section class="transfer-requirements" aria-labelledby="transferRequirementsTitle">
+            <h3 id="transferRequirementsTitle">导入并继续对话的硬性条件</h3>
+            <ul>
+              <li><strong>项目必须单独迁移：</strong>迁移包不包含源码；目标目录的有效文件内容必须与导出时一致。</li>
+              <li><strong>必须映射项目目录：</strong>旧电脑记录的每个项目路径，都要选择新电脑上的对应目录并通过指纹校验。</li>
+              <li><strong>会话 ID 不能冲突：</strong>同 ID、同正文会跳过或补建索引；同 ID、不同正文会硬性拒绝，绝不覆盖。</li>
+              <li><strong>目标 Codex 必须已经初始化：</strong>新电脑需要先安装并至少启动一次 Codex，以生成当前版本的状态数据库。</li>
+              <li><strong>应用导入前必须完全退出 Codex：</strong>否则运行中的 Codex 可能把旧状态重新写回。</li>
+            </ul>
+            <p>不能满足项目一致性时，只能选择“仅作为历史记录导入”，不能直接恢复续聊。</p>
+          </section>
+          <section class="transfer-section">
+            <h3>从本机导出</h3>
+            <p id="transferExportSummary" class="muted">请先在会话列表勾选要迁移的 Codex 会话。</p>
+            <div id="transferExportFeedback" class="transfer-inline-feedback hidden" role="alert" tabindex="-1"></div>
+            <button id="exportSessionsButton" type="button" class="outline-accent wide-button">导出已选会话</button>
+          </section>
+        </div>
+      </dialog>
+
+      <dialog id="sessionImportDialog" class="session-delete-dialog session-transfer-dialog">
+        <div class="session-delete-card">
+          <div class="visibility-head">
+            <div>
+              <h2>导入 Codex 会话</h2>
+              <p>选择其他电脑或本机导出的 .ccsm 迁移包，校验后再决定是否恢复续聊。</p>
+            </div>
+            <button id="closeSessionImportButton" type="button">关闭</button>
+          </div>
+          <section class="transfer-requirements" aria-labelledby="transferImportRequirementsTitle">
+            <h3 id="transferImportRequirementsTitle">导入并继续对话的硬性条件</h3>
+            <ul>
+              <li><strong>项目必须单独迁移：</strong>迁移包不包含源码；目标目录的有效文件内容必须与导出时一致。</li>
+              <li><strong>必须映射项目目录：</strong>旧电脑记录的每个项目路径，都要选择新电脑上的对应目录并通过指纹校验。</li>
+              <li><strong>会话 ID 不能冲突：</strong>同 ID、同正文会跳过或补建索引；同 ID、不同正文会硬性拒绝，绝不覆盖。</li>
+              <li><strong>目标 Codex 必须已经初始化：</strong>新电脑需要先安装并至少启动一次 Codex，以生成当前版本的状态数据库。</li>
+              <li><strong>应用导入前必须完全退出 Codex：</strong>否则运行中的 Codex 可能把旧状态重新写回。</li>
+            </ul>
+            <p>不能满足项目一致性时，只能选择“仅作为历史记录导入”，不能直接恢复续聊。</p>
+          </section>
+          <section class="transfer-section">
+            <h3>导入迁移包</h3>
+            <label class="path-migration-field">
+              <span>迁移包（.ccsm）</span>
+              <input id="transferPackageFile" type="file" accept=".ccsm,application/vnd.ccsm.session-transfer">
+            </label>
+            <div id="transferUploadStatus" class="muted">选择文件后会先校验正文和 SHA-256，不会立即写入 Codex。</div>
+            <div id="transferImportFeedback" class="transfer-inline-feedback hidden" role="alert" tabindex="-1"></div>
+            <div id="transferMappings" class="transfer-mappings hidden"></div>
+            <fieldset id="transferMode" class="transfer-mode hidden">
+              <legend>导入方式</legend>
+              <label><input type="radio" name="transferMode" value="resume" checked><span>导入并继续对话（要求项目上下文一致）</span></label>
+              <label><input type="radio" name="transferMode" value="history"><span>仅作为历史记录导入（不写入 Codex 会话索引）</span></label>
+            </fieldset>
+            <button id="previewSessionImportButton" type="button" class="outline-accent wide-button" disabled>校验项目并预览导入</button>
+          </section>
+          <section id="transferImportPlan" class="transfer-section hidden">
+            <h3>导入预览</h3>
+            <dl class="visibility-grid">
+              <dt>包内会话</dt><dd id="transferPlanSessions">-</dd>
+              <dt>将导入</dt><dd id="transferPlanImportable">-</dd>
+              <dt>已存在</dt><dd id="transferPlanExisting">-</dd>
+              <dt>正文冲突</dt><dd id="transferPlanConflicts">-</dd>
+              <dt>目录未映射</dt><dd id="transferPlanMappingsRequired">-</dd>
+              <dt>项目内容不同</dt><dd id="transferPlanMismatches">-</dd>
+            </dl>
+            <div id="transferPlanWarning" class="mode-warning warning hidden"></div>
+            <label class="confirm visibility-confirm">
+              <span>输入 IMPORT 确认</span>
+              <input id="transferImportConfirmation" autocomplete="off" spellcheck="false">
+            </label>
+            <button id="applySessionImportButton" type="button" class="primary wide-button" disabled>创建安全点并导入</button>
+          </section>
+        </div>
+      </dialog>
+
       <dialog id="backupManagerDialog" class="session-delete-dialog backup-manager-dialog">
         <form method="dialog" class="session-delete-card">
           <div class="visibility-head">
@@ -373,6 +459,7 @@
               <button id="projectPathButton" type="button" class="btn btn-sm outline-accent" disabled>迁移项目路径</button>
               <button id="visibilityButton" type="button" class="btn btn-sm outline-accent">可见性修复</button>
               <button id="batchDeleteSessionsButton" type="button" class="btn btn-sm danger-outline" disabled>批量删除</button>
+              <button id="sessionTransferButton" type="button" class="btn btn-sm outline-accent">导出会话</button>
             </div>
             <div id="batchToolbar" class="batch-toolbar">
               <label class="batch-select-all"><input id="selectVisibleSessions" type="checkbox"><span>全选可删除结果</span></label>

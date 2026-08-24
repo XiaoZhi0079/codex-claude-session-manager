@@ -1,7 +1,9 @@
 ﻿import http from 'node:http';
-import { existsSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { createReadStream, existsSync } from 'node:fs';
+import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { pickDirectory } from './directory-picker.mjs';
 
@@ -93,6 +95,14 @@ import {
   previewCodexProjectPathMigration,
   restoreProjectPathMigration,
 } from './project-path-migration.mjs';
+import {
+  applyCodexSessionImport,
+  createCodexSessionPackage,
+  previewCodexSessionImport,
+  stageCodexSessionPackageStream,
+  undoCodexSessionImport,
+} from './codex-session-transfer.mjs';
+import { acquireInstanceLocks } from './instance-lock.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -137,17 +147,36 @@ function projectPathPlatform(value) {
 }
 
 function sendDownload(response, download) {
+  const content = Buffer.isBuffer(download.content)
+    ? download.content
+    : Buffer.from(download.content, 'utf8');
   response.writeHead(200, {
     'content-type': download.contentType,
     'content-disposition': `attachment; filename="${download.fileName}"`,
-    'content-length': Buffer.byteLength(download.content, 'utf8'),
+    'content-length': content.length,
     'cache-control': 'no-store',
-    'x-context-record-count': String(download.recordCount),
+    'x-context-record-count': String(download.recordCount ?? download.sessionCount ?? 0),
   });
-  response.end(download.content);
+  response.end(content);
+}
+
+async function sendFileDownload(response, download) {
+  response.writeHead(200, {
+    'content-type': download.contentType,
+    'content-disposition': `attachment; filename="${download.fileName}"`,
+    'content-length': download.sizeBytes,
+    'cache-control': 'no-store',
+    'x-context-record-count': String(download.sessionCount ?? 0),
+  });
+  try { await pipeline(createReadStream(download.filePath), response); }
+  finally { await unlink(download.filePath).catch(() => {}); }
 }
 
 function sendError(response, error) {
+  if (response.headersSent) {
+    response.destroy(error);
+    return;
+  }
   if (error instanceof CleanerError) {
     sendJson(response, error.status, {
       error: {
@@ -302,20 +331,25 @@ export function createCleanerServer(options = {}) {
     backupRoot,
     instanceId: options.instanceId,
   });
+  const transferRoot = options.transferRoot || path.join(backupRoot, 'transfers');
   let registryCache = null;
   let claudeRegistryCache = null;
+  let lastSessionExportAttempt = null;
 
   async function executeRecordedOperation(meta, action, completionBuilder = () => ({})) {
     const sessionIds = [...new Set((meta.sessionIds || []).map(String))];
-    let sessionTitles = {};
+    let sessionTitles = { ...(meta.details?.sessionTitles || {}) };
     try {
       const registry = isClaudeOperation(meta.kind)
         ? await loadClaudeRegistry({ refresh: true })
         : await loadRegistry({ refresh: true });
-      sessionTitles = Object.fromEntries(sessionIds
+      sessionTitles = {
+        ...sessionTitles,
+        ...Object.fromEntries(sessionIds
         .map((id) => registry.sessions.find((session) => session.id === id))
         .filter(Boolean)
-        .map((session) => [session.id, session.title || '(无标题会话)']));
+        .map((session) => [session.id, session.title || '(无标题会话)'])),
+      };
     } catch {
       // Operation recording must not block the mutation if title lookup fails.
     }
@@ -433,6 +467,13 @@ export function createCleanerServer(options = {}) {
         { backupRoot: undo.backupRoot, backupDir: undo.backupDir },
       );
     }
+    if (undo.type === 'codex_session_import_restore') {
+      return undoCodexSessionImport(codexHome, {
+        backupRoot,
+        manifestPath: undo.manifestPath,
+        codexProcessCheck: options.codexProcessCheck,
+      });
+    }
     throw new CleanerError('UNDO_NOT_SUPPORTED', 'The latest operation does not have a supported restore point.', 409);
   }
 
@@ -483,6 +524,106 @@ export function createCleanerServer(options = {}) {
         sendJson(response, 200, await operationHistory.list({
           limit: Number.isInteger(limit) ? limit : 100,
         }));
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/codex-session-transfer/export' && request.method === 'POST') {
+        const body = await readJsonRequest(request);
+        const sessionIds = [...new Set((body.sessionIds || []).map(String))];
+        const attemptId = randomUUID();
+        try {
+          const download = await createCodexSessionPackage(codexHome, {
+            backupRoot,
+            transferRoot,
+            env,
+            sessionIds,
+            keepFile: true,
+          });
+          lastSessionExportAttempt = {
+            attemptId,
+            at: new Date().toISOString(),
+            status: 'success',
+            sessionIds,
+            sessionCount: download.sessionCount,
+            sizeBytes: download.sizeBytes,
+          };
+          await sendFileDownload(response, download);
+        } catch (error) {
+          lastSessionExportAttempt = {
+            attemptId,
+            at: new Date().toISOString(),
+            status: 'failed',
+            sessionIds,
+            error: {
+              code: error?.code || 'INTERNAL_ERROR',
+              message: error?.message || 'Unexpected export error.',
+              details: error?.details || {},
+            },
+          };
+          throw error;
+        }
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/codex-session-transfer/export-diagnostic' && request.method === 'GET') {
+        sendJson(response, 200, { lastAttempt: lastSessionExportAttempt });
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/codex-session-transfer/import-upload' && request.method === 'POST') {
+        sendJson(response, 201, await stageCodexSessionPackageStream(request, transferRoot, {
+          declaredBytes: request.headers['content-length'],
+        }));
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/codex-session-transfer/import-preview' && request.method === 'POST') {
+        const body = await readJsonRequest(request);
+        const plan = await previewCodexSessionImport(codexHome, {
+          backupRoot,
+          transferRoot,
+          env,
+          transferId: body.transferId,
+          pathMappings: body.pathMappings,
+          mode: body.mode,
+          codexProcessCheck: options.codexProcessCheck,
+        });
+        const { packagePath: _packagePath, ...publicPlan } = plan;
+        sendJson(response, 200, publicPlan);
+        return;
+      }
+
+      if (requestUrl.pathname === '/api/codex-session-transfer/import-apply' && request.method === 'POST') {
+        const body = await readJsonRequest(request);
+        if (body.confirmation !== 'IMPORT') {
+          throw new CleanerError('SESSION_IMPORT_CONFIRMATION_REQUIRED', 'Type IMPORT to import the selected Codex sessions.', 400);
+        }
+        const preview = await previewCodexSessionImport(codexHome, {
+          backupRoot, transferRoot, env, transferId: body.transferId,
+          pathMappings: body.pathMappings, mode: body.mode,
+          codexProcessCheck: options.codexProcessCheck,
+        });
+        const result = await executeRecordedOperation({
+          kind: 'codex_session_import',
+          label: preview.mode === 'history' ? '导入 Codex 历史会话' : '导入 Codex 会话并恢复续聊',
+          sessionIds: preview.sessions.filter((session) => session.action === 'import').map((session) => session.id),
+          details: {
+            mode: preview.mode,
+            transferId: body.transferId,
+            count: preview.summary.importable,
+            sessionTitles: Object.fromEntries(preview.sessions.map((session) => [session.id, session.title || '(无标题会话)'])),
+          },
+        }, () => applyCodexSessionImport(codexHome, {
+          backupRoot, transferRoot, env, transferId: body.transferId,
+          pathMappings: body.pathMappings, mode: body.mode,
+          planToken: body.planToken,
+          codexProcessCheck: options.codexProcessCheck,
+        }), (value) => ({
+          result: { importedSessions: value.preview.summary.importable, mode: value.preview.mode, restartRequired: value.restartRequired },
+          undo: { type: 'codex_session_import_restore', manifestPath: value.manifestPath },
+        }));
+        registryCache = null;
+        sendJson(response, 200, result);
         return;
       }
 
@@ -1545,13 +1686,6 @@ export function resolveCleanerPort(options = {}, env = process.env) {
   return port;
 }
 
-function hasExplicitPort(options, env) {
-  return options.port !== undefined
-    || env.CODEX_CLAUDE_SESSION_MANAGER_PORT !== undefined
-    || env.CODEX_CLEANER_PORT !== undefined
-    || env.PORT !== undefined;
-}
-
 function listen(server, port, host) {
   return new Promise((resolve, reject) => {
     const onError = (error) => {
@@ -1572,26 +1706,31 @@ export async function startCleanerServer(options = {}) {
   const env = options.env || process.env;
   const requestedPort = resolveCleanerPort(options, env);
   const host = options.host || '127.0.0.1';
-  const explicitPort = hasExplicitPort(options, env);
-  const maxAttempts = explicitPort ? 1 : Math.max(1, options.portFallbackCount || 10);
-
-  let lastError;
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const port = requestedPort === 0 ? 0 : requestedPort + attempt;
-    if (port > 65535) break;
-    const server = createCleanerServer(options);
-    try {
-      await listen(server, port, host);
-      const address = server.address();
-      const actualPort = typeof address === 'object' && address ? address.port : port;
-      return { server, url: `http://${host}:${actualPort}`, port: actualPort };
-    } catch (error) {
-      lastError = error;
-      if (error?.code !== 'EACCES' && error?.code !== 'EADDRINUSE') throw error;
-    }
+  const codexHome = options.codexHome || getDefaultCodexHome(env);
+  const claudeHome = options.claudeHome || getDefaultClaudeHome(env);
+  const instanceLocks = await acquireInstanceLocks({
+    ...options,
+    env,
+    port: requestedPort,
+    codexHome,
+    claudeHome,
+  });
+  const server = createCleanerServer({ ...options, codexHome, claudeHome });
+  try {
+    await listen(server, requestedPort, host);
+    const address = server.address();
+    const actualPort = typeof address === 'object' && address ? address.port : requestedPort;
+    server.once('close', () => { instanceLocks.release().catch(() => {}); });
+    return {
+      server,
+      url: `http://${host}:${actualPort}`,
+      port: actualPort,
+      releaseInstanceLocks: () => instanceLocks.release(),
+    };
+  } catch (error) {
+    await instanceLocks.release();
+    throw error;
   }
-
-  throw lastError || new CleanerError('PORT_UNAVAILABLE', 'No available cleaner port was found.', 503);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

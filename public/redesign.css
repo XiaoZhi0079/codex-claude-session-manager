@@ -317,6 +317,10 @@ body.resizing-panels { cursor: col-resize; user-select: none; }
   border-radius: 8px; background: var(--danger-soft); color: var(--fg); box-shadow: 0 8px 28px color-mix(in oklab, black 18%, transparent);
 }
 .alert.success { border-color: var(--ok); background: var(--ok-soft); color: var(--fg); }
+.dialog-runtime-alert {
+  position: sticky; top: 0; left: auto; bottom: auto; z-index: 5; max-width: none;
+  margin: 0; transform: none; border-radius: 7px; box-shadow: 0 8px 24px color-mix(in oklab, black 18%, transparent);
+}
 
 dialog, .visibility-panel {
   border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface); color: var(--fg);
@@ -324,6 +328,27 @@ dialog, .visibility-panel {
 }
 dialog::backdrop { background: color-mix(in oklab, var(--bg) 55%, transparent); backdrop-filter: blur(3px); }
 .session-delete-dialog { width: min(760px, calc(100vw - 48px)); max-width: none; padding: 0; background: var(--surface); }
+.session-transfer-dialog { width: min(820px, calc(100vw - 48px)); max-height: calc(100dvh - 48px); }
+.session-transfer-dialog .session-delete-card { max-height: calc(100dvh - 50px); overflow-y: auto; }
+.transfer-requirements { padding: 13px 14px; border: 1px solid color-mix(in oklab, var(--warn) 52%, var(--border)); border-radius: 8px; background: var(--warn-soft); }
+.transfer-requirements h3 { margin: 0 0 8px; color: var(--fg); font-size: 13px; }
+.transfer-requirements ul { display: grid; gap: 6px; margin: 0; padding-left: 20px; color: var(--fg); font-size: 11.5px; line-height: 1.55; }
+.transfer-requirements p { margin: 9px 0 0; color: var(--warn); font-size: 11.5px; font-weight: 650; line-height: 1.55; }
+.transfer-section { display: grid; gap: 10px; padding: 13px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.transfer-section h3 { margin: 0; color: var(--fg); font-size: 13px; }
+.transfer-section > p { margin: 0; font-size: 12px; line-height: 1.6; }
+.transfer-inline-feedback { display: grid; gap: 5px; padding: 10px 11px; border: 1px solid color-mix(in oklab, var(--danger) 48%, var(--border)); border-radius: 7px; background: var(--danger-soft); color: var(--fg); font-size: 11.5px; line-height: 1.55; }
+.transfer-inline-feedback.success { border-color: color-mix(in oklab, var(--ok) 48%, var(--border)); background: var(--ok-soft); }
+.transfer-inline-feedback strong { font-size: 12px; }
+.transfer-inline-feedback code { overflow-wrap: anywhere; color: var(--muted); font: 10.5px/1.55 var(--font-mono); }
+.transfer-mappings { display: grid; gap: 10px; }
+.transfer-mappings > strong { color: var(--fg); font-size: 12.5px; }
+.transfer-mappings > .muted { font-size: 11.5px; line-height: 1.55; }
+.transfer-mapping { padding-top: 9px; border-top: 1px solid var(--border); }
+.transfer-mapping small { color: var(--faint); font: 10.5px var(--font-mono); }
+.transfer-mode { display: grid; gap: 8px; margin: 0; padding: 11px 12px; border: 1px solid var(--border); border-radius: 7px; }
+.transfer-mode legend { padding: 0 5px; color: var(--muted); font-size: 11.5px; }
+.transfer-mode label { display: flex; align-items: center; gap: 8px; color: var(--fg); font-size: 12px; }
 .session-delete-card { display: grid; gap: 14px; padding: 18px; border: 0; border-radius: 10px; background: var(--surface); color: var(--fg); box-shadow: none; }
 .path-migration-field { display: grid; gap: 6px; }
 .path-migration-field > span, .path-migration-field > label { color: var(--muted); font-size: 11.5px; }
