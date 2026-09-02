@@ -189,6 +189,13 @@ body.resizing-panels { cursor: col-resize; user-select: none; }
 .session-health-button.health-incomplete .health-dot { background: var(--danger); }
 
 .turns-empty { padding: 22px 14px; color: var(--faint); font-size: 12px; text-align: center; }
+.thread-history-warning {
+  display: grid; gap: 3px; margin: 0 0 8px; padding: 9px 10px;
+  border: 1px solid color-mix(in oklab, var(--warn) 48%, var(--border)); border-radius: 7px;
+  background: var(--warn-soft); color: var(--fg); font-size: 11.5px; line-height: 1.55;
+}
+.thread-history-warning strong { font-size: 12px; }
+.thread-history-warning code { color: var(--muted); font-size: 10px; }
 .turn-header { display: none; }
 .turn-row {
   width: 100%; display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 2px 8px;

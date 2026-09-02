@@ -319,6 +319,10 @@ function tableExists(db, tableName) {
   return Boolean(db.prepare('SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?').get('table', tableName));
 }
 
+function tableColumns(db, tableName) {
+  return new Set(db.prepare(`PRAGMA table_info(${tableName})`).all().map((column) => String(column.name)));
+}
+
 export async function backupThreadHistoryDatabase(codexHome, backupDir, options = {}) {
   const dbPath = await resolveThreadHistoryDbPath(codexHome, options);
   if (!dbPath || !await pathExists(dbPath)) return null;
@@ -426,8 +430,14 @@ export async function readThreadHistoryTurnRows(codexHome, sessionIds, options =
   try {
     db.exec('PRAGMA busy_timeout=5000');
     if (!tableExists(db, 'thread_turns')) return { available: false, dbPath, rows: [], reason: 'unsupported_schema' };
+    const columns = tableColumns(db, 'thread_turns');
+    if (!columns.has('thread_id') || !columns.has('turn_id')) {
+      return { available: false, dbPath, rows: [], reason: 'unsupported_schema' };
+    }
+    const optional = ['rollout_ordinal', 'status', 'error_json', 'started_at', 'completed_at'];
+    const selections = optional.map((name) => columns.has(name) ? name : `NULL AS ${name}`);
     const query = db.prepare(`
-      SELECT thread_id, turn_id, rollout_ordinal, status, error_json, started_at, completed_at
+      SELECT thread_id, turn_id, ${selections.join(', ')}
       FROM thread_turns
       WHERE thread_id = ?
       ORDER BY rollout_ordinal ASC
@@ -450,7 +460,12 @@ export async function readThreadHistoryTurnRows(codexHome, sessionIds, options =
         });
       }
     }
-    return { available: true, dbPath, rows };
+    return {
+      available: true,
+      dbPath,
+      rows,
+      capabilities: Object.fromEntries(optional.map((name) => [name, columns.has(name)])),
+    };
   } finally {
     db.close();
   }

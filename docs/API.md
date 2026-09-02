@@ -9,7 +9,7 @@
 | GET | `/api/health` | 服务存活检查 |
 | GET | `/api/sessions` | 重新扫描并返回目录、会话和汇总 |
 | GET | `/api/sessions/:id/health` | 会话完整性与来源诊断 |
-| GET | `/api/sessions/:id/turns` | 解析会话轮次 |
+| GET | `/api/sessions/:id/turns` | 解析会话轮次；分页历史数据库异常时仍返回 rollout 正文，并在 `threadHistory` 标注降级原因 |
 | POST | `/api/turn-detail` | 读取紧凑轮次消息 |
 | POST | `/api/full-context` | 完整上下文筛选、分页与定位 |
 | POST | `/api/full-context/export` | 导出 JSONL 或 Markdown |

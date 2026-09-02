@@ -335,6 +335,9 @@ export function createCleanerServer(options = {}) {
   let registryCache = null;
   let claudeRegistryCache = null;
   let lastSessionExportAttempt = null;
+  const reportServerError = options.errorReporter || ((entry) => {
+    process.stderr.write(`${JSON.stringify(entry)}\n`);
+  });
 
   async function executeRecordedOperation(meta, action, completionBuilder = () => ({})) {
     const sessionIds = [...new Set((meta.sessionIds || []).map(String))];
@@ -1406,14 +1409,55 @@ export function createCleanerServer(options = {}) {
         if (!session.rolloutPath) {
           throw new CleanerError('ROLLOUT_NOT_FOUND', 'No rollout JSONL was found for this session.', 404);
         }
-        const records = await readRollout(session.rolloutPath);
-        const history = await readThreadHistoryTurnRows(codexHome, [session.id]);
+        let records;
+        try {
+          records = await readRollout(session.rolloutPath);
+        } catch (error) {
+          if (error instanceof CleanerError) throw error;
+          throw new CleanerError(
+            'ROLLOUT_READ_FAILED',
+            'The formal Codex rollout could not be read.',
+            500,
+            { sessionId: session.id, rolloutPath: session.rolloutPath, technicalMessage: error?.message || String(error) },
+          );
+        }
+        let history;
+        try {
+          history = await (options.threadHistoryTurnReader || readThreadHistoryTurnRows)(codexHome, [session.id]);
+        } catch (error) {
+          const errorId = randomUUID();
+          reportServerError({
+            level: 'error',
+            event: 'thread_history_read_failed',
+            errorId,
+            sessionId: session.id,
+            error: { name: error?.name || 'Error', code: error?.code || null, message: error?.message || String(error) },
+          });
+          history = {
+            available: false,
+            dbPath: error?.details?.dbPath || null,
+            rows: [],
+            reason: 'read_failed',
+            error: {
+              code: 'THREAD_HISTORY_READ_FAILED',
+              errorId,
+              technicalMessage: error?.message || String(error),
+            },
+          };
+        }
         const merged = mergeThreadHistoryTurnRows(listTurnsFromRecords(records), history.rows);
         sendJson(response, 200, {
           session,
           turns: merged.turns,
           historyErrors: merged.unmatchedErrors,
-          threadHistory: { available: history.available, dbPath: history.dbPath, rowCount: history.rows.length },
+          threadHistory: {
+            available: history.available,
+            dbPath: history.dbPath,
+            rowCount: history.rows.length,
+            reason: history.reason || null,
+            capabilities: history.capabilities || null,
+            error: history.error || null,
+          },
           recordCount: records.length,
         });
         return;

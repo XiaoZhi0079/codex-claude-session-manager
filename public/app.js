@@ -3,6 +3,8 @@ const state = {
   sessions: [],
   directories: [],
   turns: [],
+  historyErrors: [],
+  threadHistoryWarning: null,
   selectedDirectory: '*',
   selectedSession: null,
   selectedTurn: null,
@@ -154,6 +156,7 @@ async function setPlatform(platform) {
   state.directories = [];
   state.turns = [];
   state.historyErrors = [];
+  state.threadHistoryWarning = null;
   state.selectedDirectory = '*';
   state.selectedSession = null;
   state.selectedTurn = null;
@@ -1136,8 +1139,9 @@ async function runHealthAction(actionId) {
 
 function renderTurns(turns) {
   const historyErrors = state.historyErrors || [];
-  $('turnCount').textContent = `${turns.length} 轮${historyErrors.length ? ` · ${historyErrors.length} 条分页失败` : ''}`;
-  if (!turns.length && !historyErrors.length) {
+  const historyWarning = state.threadHistoryWarning;
+  $('turnCount').textContent = `${turns.length} 轮${historyErrors.length ? ` · ${historyErrors.length} 条分页失败` : ''}${historyWarning ? ' · 分页信息不可用' : ''}`;
+  if (!turns.length && !historyErrors.length && !historyWarning) {
     $('turns').className = 'turns-empty';
     $('turns').textContent = '没有识别到轮次边界。';
     return;
@@ -1177,7 +1181,13 @@ function renderTurns(turns) {
       <button type="button" class="btn btn-sm outline-accent" data-restore-history-operation="${escapeHtml(state.lastHistoryErrorDeletion.operationId)}">立即恢复</button>
     </div>
   ` : '';
-  $('turns').innerHTML = undoBanner + `
+  const historyWarningBanner = historyWarning ? `
+    <div class="thread-history-warning" role="status">
+      <strong>分页历史附加信息暂时不可用</strong>
+      <span>正式 rollout 对话仍已正常显示；错误编号 <code>${escapeHtml(historyWarning.errorId || historyWarning.code || 'THREAD_HISTORY_READ_FAILED')}</code>。</span>
+    </div>
+  ` : '';
+  $('turns').innerHTML = historyWarningBanner + undoBanner + `
     <div class="turn-header">
       <span>#</span><span>时间</span><span>行号</span><span>摘要</span>
     </div>
@@ -1671,6 +1681,9 @@ async function loadTurns() {
   const body = await api(`${prefix}/${encodeURIComponent(state.selectedSession.id)}/turns`);
   state.turns = body.turns;
   state.historyErrors = body.historyErrors || [];
+  state.threadHistoryWarning = body.threadHistory?.reason === 'read_failed'
+    ? (body.threadHistory.error || { code: 'THREAD_HISTORY_READ_FAILED' })
+    : null;
   renderTurns(body.turns);
   syncFullContextTurnJump();
 }

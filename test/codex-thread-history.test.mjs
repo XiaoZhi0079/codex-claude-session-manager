@@ -127,6 +127,24 @@ test('reads failed turn status and error_json from paginated history', async () 
   assert.equal(row.error.message, 'upstream bad request');
 });
 
+test('reads legacy thread_turns schemas without optional status columns', async () => {
+  const data = await historyFixture();
+  const result = await readThreadHistoryTurnRows(data.codexHome, [TARGET_ID]);
+  assert.equal(result.available, true);
+  assert.equal(result.rows.length, 1);
+  assert.deepEqual(result.rows[0], {
+    sessionId: TARGET_ID,
+    turnId: `${TARGET_ID}-turn`,
+    rolloutOrdinal: null,
+    status: null,
+    error: null,
+    startedAt: null,
+    completedAt: null,
+  });
+  assert.equal(result.capabilities.error_json, false);
+  assert.equal(result.capabilities.status, false);
+});
+
 test('database backup helper safely snapshots the current thread history', async () => {
   const data = await historyFixture();
   const result = await backupThreadHistoryDatabase(data.codexHome, path.join(data.root, 'backup'));
