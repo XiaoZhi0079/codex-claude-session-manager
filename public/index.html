@@ -231,6 +231,34 @@
         </form>
       </dialog>
 
+      <dialog id="toolDeleteDialog" class="session-delete-dialog">
+        <div class="session-delete-card">
+          <div class="visibility-head">
+            <div>
+              <h2>删除完整工具交互</h2>
+              <p>同时删除选中的工具调用、配对结果和能够确定归属的外置产物；保留同一记录中的其他内容。</p>
+            </div>
+            <button id="closeToolDeleteButton" type="button">关闭</button>
+          </div>
+          <dl class="visibility-grid">
+            <dt>工具</dt><dd id="toolDeleteName">-</dd>
+            <dt>工具调用 ID</dt><dd id="toolDeleteId">-</dd>
+            <dt>调用内容块</dt><dd id="toolDeleteCalls">-</dd>
+            <dt>配对结果块</dt><dd id="toolDeleteResults">-</dd>
+            <dt>受影响 JSONL 记录</dt><dd id="toolDeleteRecords">-</dd>
+            <dt>外置结果文件</dt><dd id="toolDeleteFiles">-</dd>
+            <dt>关联子代理</dt><dd id="toolDeleteSubagents">-</dd>
+            <dt>备份目录</dt><dd id="toolDeleteBackup">-</dd>
+          </dl>
+          <div id="toolDeleteWarning" class="mode-warning warning"></div>
+          <label class="confirm visibility-confirm">
+            <span>输入 DELETE 确认</span>
+            <input id="toolDeleteConfirmation" autocomplete="off" spellcheck="false">
+          </label>
+          <button id="applyToolDeleteButton" type="button" class="danger wide-button" disabled>备份并删除工具交互</button>
+        </div>
+      </dialog>
+
       <dialog id="sessionTransferDialog" class="session-delete-dialog session-transfer-dialog">
         <div class="session-delete-card">
           <div class="visibility-head">

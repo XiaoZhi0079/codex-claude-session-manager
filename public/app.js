@@ -19,6 +19,7 @@ const state = {
   edits: new Map(),
   editPreview: null,
   lastEdit: null,
+  toolDeletePlan: null,
   cleanupSourceHash: null,
   cleanupTargetActive: false,
   currentProvider: null,
@@ -116,7 +117,7 @@ function configurePlatformUI() {
   $('fullContextModeLabel').textContent = claude ? '落盘模式' : '完整模式';
   $('fullContextDescription').textContent = claude ? '实际保存的工具、注入与客户端事件' : '全部落盘上下文';
   $('fullContextWarning').textContent = claude
-    ? '落盘模式展示 Claude Code 实际写入会话包的内容，可能包含敏感数据。内置基础身份提示词由客户端运行时组装，未写入历史 JSONL，因此无法从旧会话精确还原。'
+    ? '落盘模式展示 Claude Code 实际写入会话包的内容，可能包含敏感数据。当前轮主会话中可精确定位的文本可以编辑；此前轮次、子代理、外置工具结果和结构字段保持只读。内置基础身份提示词未写入历史 JSONL。'
     : '完整模式会显示 session 中实际保存的提示词、环境信息、工具输入与输出等，可能包含敏感数据。请勿直接截图或分享。未写入 session 的运行时内容无法还原。';
   $('fullContextSourceLabel').textContent = claude ? '内容来源' : '角色';
   $('fullContextRoleFilter').innerHTML = claude ? `
@@ -1254,6 +1255,8 @@ function renderCleanupPreview(body) {
 
 function messageRoleLabel(message) {
   if (message.role === 'user') return '你';
+  if (message.role === 'tool_call') return `${isClaudePlatform() ? 'Claude' : 'Codex'} · 工具调用${message.name ? ` · ${message.name}` : ''}`;
+  if (message.role === 'tool_result') return `工具结果${message.name ? ` · ${message.name}` : ''}`;
   if (message.role === 'error') return message.phase === 'turn_aborted' ? 'Codex · 任务中止' : 'Codex · 错误';
   if (isClaudePlatform()) {
     if (message.phase === 'commentary') return 'Claude · 过程回复';
@@ -1265,9 +1268,13 @@ function messageRoleLabel(message) {
   return 'Codex';
 }
 
-function findMessagePart(targetId) {
+function findEditablePart(targetId) {
   for (const message of state.turnDetail?.messages || []) {
     const part = message.parts.find((candidate) => candidate.targetId === targetId);
+    if (part) return part;
+  }
+  for (const record of state.fullContext?.records || []) {
+    const part = record.editableParts?.find((candidate) => candidate.targetId === targetId);
     if (part) return part;
   }
   return null;
@@ -1281,7 +1288,7 @@ function resizeMessageEditor(textarea) {
 function renderMessages() {
   const messages = state.turnDetail?.messages || [];
   if (!messages.length) {
-    $('messageList').innerHTML = '<div class="list-status">本轮没有可见的用户或 Codex 消息。</div>';
+    $('messageList').innerHTML = `<div class="list-status">本轮没有可见的用户、${isClaudePlatform() ? 'Claude 或工具' : 'Codex'}消息。</div>`;
     $('editActions').classList.add('hidden');
     return;
   }
@@ -1290,15 +1297,21 @@ function renderMessages() {
     <article class="message-block role-${message.role}">
       <header class="message-head">
         <strong>${escapeHtml(messageRoleLabel(message))}</strong>
-        <span>第 ${message.lineNumber} 行</span>
+        <span>第 ${message.lineNumber} 行${message.externalOutput ? ` · 外置完整输出 ${escapeHtml(formatBytes(message.externalOutput.sizeBytes))}` : ''}</span>
       </header>
-      ${message.parts.map((part) => message.editable === false ? `
-        <div class="message-part runtime-error-message"><pre>${escapeHtml(part.text)}</pre></div>
+      ${message.parts.map((part, partIndex) => message.editable === false ? `
+        <div class="message-part runtime-error-message">
+          <pre>${escapeHtml(part.text)}</pre>
+          ${message.readOnlyReason ? `<p class="message-readonly-reason">${escapeHtml(message.readOnlyReason)}</p>` : ''}
+          ${partIndex === 0 && message.role === 'tool_call' && message.toolUseId ? `<div class="message-actions"><button type="button" class="danger-outline" data-delete-tool="${escapeHtml(message.toolUseId)}">删除工具调用</button></div>` : ''}
+        </div>
       ` : `
         <div class="message-part">
+          ${(message.role === 'tool_call' || message.role === 'tool_result') && part.label ? `<span class="context-editable-label">${escapeHtml(part.label)}</span>` : ''}
           <textarea data-message-target="${part.targetId}" readonly spellcheck="false">${escapeHtml(state.edits.get(part.targetId)?.newText ?? part.text)}</textarea>
           ${`<div class="message-actions">
             <button type="button" data-edit-target="${part.targetId}">编辑</button>
+            ${partIndex === 0 && message.role === 'tool_call' && message.toolUseId ? `<button type="button" class="danger-outline" data-delete-tool="${escapeHtml(message.toolUseId)}">删除工具调用</button>` : ''}
           </div>`}
         </div>
       `).join('')}
@@ -1444,11 +1457,23 @@ function renderFullContext() {
     ].filter(Boolean).join(' · ');
     const textContent = highlightContextText(record.text, detail.filters.query);
     const largeToolResult = record.category === 'tool_result' && record.text?.length > 4_000;
-    const textMarkup = !record.text
+    const editableParts = record.editableParts || [];
+    const editableMarkup = editableParts.length ? `
+      <div class="context-editable-parts">
+        ${editableParts.map((part) => `
+          <div class="message-part context-editable-part">
+            <span class="context-editable-label">${escapeHtml(part.label || '可编辑文本')}</span>
+            <textarea data-message-target="${escapeHtml(part.targetId)}" readonly spellcheck="false">${escapeHtml(state.edits.get(part.targetId)?.newText ?? part.text)}</textarea>
+            <div class="message-actions"><button type="button" data-edit-target="${escapeHtml(part.targetId)}">编辑</button></div>
+          </div>
+        `).join('')}
+      </div>
+    ` : '';
+    const textMarkup = editableMarkup || (!record.text
       ? ''
       : (largeToolResult
         ? `<details class="large-context-text"><summary>展开大型工具结果 · ${formatBytes(record.text.length)}</summary><pre>${textContent}</pre></details>`
-        : `<pre class="full-context-text">${textContent}</pre>`);
+        : `<pre class="full-context-text">${textContent}</pre>`));
     return `
       <article data-context-line="${record.lineNumber}" class="full-context-record scope-${record.scope}${record.type === 'session_meta' ? ' base-instructions' : ''}${record.hasSensitiveContent ? ' sensitive-record' : ''}${detail.page.lineFound === record.lineNumber ? ' jump-target' : ''}">
         <header class="full-context-record-head">
@@ -1457,6 +1482,7 @@ function renderFullContext() {
             <span>${escapeHtml(metadata)}</span>
           </div>
           <span class="full-context-badges">
+            ${record.scope === 'current_turn' ? (record.toolCalls || []).map((tool) => `<button type="button" class="btn btn-sm danger-outline" data-delete-tool="${escapeHtml(tool.id)}">删除 ${escapeHtml(tool.name)}</button>`).join('') : ''}
             ${record.hasSensitiveContent ? `<span class="context-sensitive-badge" title="${escapeHtml(record.sensitiveKinds.join('、'))}">可能含敏感信息</span>` : ''}
             ${record.externalOutput ? `<span class="context-sensitive-badge">外置结果 ${escapeHtml(formatBytes(record.externalOutput.sizeBytes))}</span>` : ''}
             <span class="context-scope">${contextScopeLabel(record.scope)}</span>
@@ -1470,6 +1496,9 @@ function renderFullContext() {
       </article>
     `;
   }).join('');
+  $('fullContextList').querySelectorAll('textarea[data-message-target]').forEach(resizeMessageEditor);
+  $('editActions').classList.toggle('hidden', state.edits.size === 0 && !detail.records.some((record) => record.editableParts?.length));
+  updateEditControls();
   if (detail.page.lineFound) {
     requestAnimationFrame(() => {
       $('fullContextList').querySelector(`[data-context-line="${detail.page.lineFound}"]`)?.scrollIntoView({ block: 'center' });
@@ -1486,7 +1515,7 @@ function updateContextModeUI() {
   $('messageList').classList.toggle('hidden', full);
   $('fullContextView').classList.toggle('hidden', !full);
   if (full) {
-    $('editActions').classList.add('hidden');
+    $('editActions').classList.toggle('hidden', state.edits.size === 0 && !state.fullContext?.records?.some((record) => record.editableParts?.length));
     $('editPreview').classList.add('hidden');
     $('editResult').classList.add('hidden');
     renderFullContext();
@@ -1598,7 +1627,7 @@ function renderEditPreview(body) {
   $('editChanges').innerHTML = preview.changes.map((change) => `
     <article class="edit-change">
       <div class="change-head">
-        <strong>${escapeHtml(messageRoleLabel(change))}</strong>
+        <strong>${escapeHtml(change.label || messageRoleLabel(change))}</strong>
         <span>第 ${change.lineNumber} 行</span>
       </div>
       <div class="change-version before">
@@ -1867,6 +1896,60 @@ async function restoreLastEdit() {
   await loadTurns();
   await selectTurn(turnIndex, { operation: 'messages' });
   setAlert(`已撤销本次编辑。重新打开目标会话时会读取恢复后的 ${isClaudePlatform() ? 'Claude' : 'Codex'} 会话。`, 'success');
+}
+
+function toolDeleteEndpoint(toolUseId, action) {
+  const root = isClaudePlatform() ? '/api/claude-code/sessions' : '/api/sessions';
+  const turnKey = state.selectedTurn.turnId ?? state.selectedTurn.index;
+  return `${root}/${encodeURIComponent(state.selectedSession.id)}/turns/${encodeURIComponent(turnKey)}/tools/${encodeURIComponent(toolUseId)}/delete-${action}`;
+}
+
+async function previewToolInteractionDelete(toolUseId) {
+  if (!state.selectedSession || !state.selectedTurn) return;
+  const plan = await api(toolDeleteEndpoint(toolUseId, 'preview'), {
+    method: 'POST',
+    body: JSON.stringify(isClaudePlatform() ? {} : { selector: selectorForTurn(state.selectedTurn) }),
+  });
+  state.toolDeletePlan = plan;
+  $('toolDeleteName').textContent = plan.name;
+  $('toolDeleteId').textContent = plan.toolUseId;
+  $('toolDeleteCalls').textContent = String(plan.callBlockCount);
+  $('toolDeleteResults').textContent = String(plan.resultBlockCount);
+  $('toolDeleteRecords').textContent = String(plan.affectedRecordCount);
+  $('toolDeleteFiles').textContent = String(plan.externalArtifacts.toolResultFiles.length);
+  $('toolDeleteSubagents').textContent = String(plan.externalArtifacts.subagents.length);
+  $('toolDeleteBackup').textContent = plan.backupRoot;
+  $('toolDeleteWarning').textContent = plan.resultBlockCount
+    ? (isClaudePlatform()
+      ? '删除后会保留相关 JSONL 记录外壳和 parentUuid 链，只移除这次工具交互的内容块。可在操作历史中直接回退。'
+      : '删除后会移除配对的 Codex 调用与结果记录，并使分页历史在下次打开时重建；独立子代理线程不会被级联删除。可在操作历史中直接回退。')
+    : '没有找到配对的工具结果；这可能是一条尚未完成的调用。仍会备份并删除调用块。';
+  $('toolDeleteConfirmation').value = '';
+  $('applyToolDeleteButton').disabled = true;
+  $('toolDeleteDialog').showModal();
+}
+
+function closeToolDeleteDialog() {
+  state.toolDeletePlan = null;
+  $('toolDeleteDialog').close();
+}
+
+async function applyToolInteractionDelete() {
+  const plan = state.toolDeletePlan;
+  if (!plan) return;
+  const turnIndex = state.selectedTurn.index;
+  const result = await api(toolDeleteEndpoint(plan.toolUseId, 'apply'), {
+    method: 'POST',
+    body: JSON.stringify({
+      sourceHash: plan.sourceHash,
+      confirmation: $('toolDeleteConfirmation').value,
+      ...(isClaudePlatform() ? {} : { selector: selectorForTurn(state.selectedTurn) }),
+    }),
+  });
+  closeToolDeleteDialog();
+  await loadTurns();
+  if (state.turns[turnIndex]) await selectTurn(turnIndex, { operation: 'messages' });
+  setAlert(`已删除 ${result.deleted.name} 工具交互：${result.deleted.callBlocks} 个调用块、${result.deleted.resultBlocks} 个结果块。可在操作历史中回退。`, 'success');
 }
 
 async function applyCleanup() {
@@ -3280,6 +3363,11 @@ $('visibilityConfirmation').addEventListener('input', () => {
 $('applyVisibilityButton').addEventListener('click', () => applyVisibilityRepair().catch((error) => setAlert(error.message)));
 $('deleteSessionButton').addEventListener('click', () => previewSessionDelete().catch((error) => setAlert(error.message)));
 $('closeSessionDeleteButton').addEventListener('click', closeSessionDeleteDialog);
+$('closeToolDeleteButton').addEventListener('click', closeToolDeleteDialog);
+$('toolDeleteConfirmation').addEventListener('input', () => {
+  $('applyToolDeleteButton').disabled = !state.toolDeletePlan || $('toolDeleteConfirmation').value !== 'DELETE';
+});
+$('applyToolDeleteButton').addEventListener('click', () => applyToolInteractionDelete().catch((error) => setAlert(error.message)));
 $('sessionDeleteConfirmation').addEventListener('input', () => {
   $('applySessionDeleteButton').disabled = !(
     state.sessionDeletePlan?.canApply
@@ -3523,19 +3611,21 @@ $('exportFullContextJsonlButton').addEventListener('click', () => {
 $('exportFullContextMarkdownButton').addEventListener('click', () => {
   exportFullContext('markdown').catch((error) => setAlert(error.message));
 });
-$('messageList').addEventListener('click', (event) => {
+function handleEditableTextClick(event) {
   const button = event.target.closest('[data-edit-target]');
   if (!button) return;
   const targetId = button.dataset.editTarget;
-  const textarea = $('messageList').querySelector(`[data-message-target="${targetId}"]`);
+  const textarea = event.currentTarget.querySelector(`[data-message-target="${targetId}"]`);
+  if (!textarea) return;
   textarea.readOnly = !textarea.readOnly;
   button.textContent = textarea.readOnly ? '编辑' : '完成';
   if (!textarea.readOnly) textarea.focus();
-});
-$('messageList').addEventListener('input', (event) => {
+}
+
+function handleEditableTextInput(event) {
   const textarea = event.target.closest('[data-message-target]');
   if (!textarea) return;
-  const part = findMessagePart(textarea.dataset.messageTarget);
+  const part = findEditablePart(textarea.dataset.messageTarget);
   if (!part) return;
   if (textarea.value === part.text) {
     state.edits.delete(part.targetId);
@@ -3549,11 +3639,23 @@ $('messageList').addEventListener('input', (event) => {
   clearEditPreview();
   updateEditControls();
   resizeMessageEditor(textarea);
-});
+}
+
+$('messageList').addEventListener('click', handleEditableTextClick);
+$('messageList').addEventListener('input', handleEditableTextInput);
+function handleToolDeleteClick(event) {
+  const button = event.target.closest('[data-delete-tool]');
+  if (button) previewToolInteractionDelete(button.dataset.deleteTool).catch((error) => setAlert(error.message));
+}
+$('messageList').addEventListener('click', handleToolDeleteClick);
+$('fullContextList').addEventListener('click', handleToolDeleteClick);
+$('fullContextList').addEventListener('click', handleEditableTextClick);
+$('fullContextList').addEventListener('input', handleEditableTextInput);
 $('discardEditsButton').addEventListener('click', () => {
   state.edits = new Map();
   clearEditPreview();
-  renderMessages();
+  if (state.contextMode === 'full') renderFullContext();
+  else renderMessages();
 });
 $('previewEditsButton').addEventListener('click', () => previewEdits().catch((error) => setAlert(error.message)));
 $('editConfirmation').addEventListener('input', () => {

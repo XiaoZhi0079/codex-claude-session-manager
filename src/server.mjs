@@ -10,6 +10,7 @@ import { pickDirectory } from './directory-picker.mjs';
 import {
   applyCleanup,
   applyMessageEdits,
+  applyToolInteractionDeletion,
   CLEANUP_MODES,
   CleanerError,
   getDefaultCodexHome,
@@ -18,6 +19,7 @@ import {
   mergeThreadHistoryTurnRows,
   previewCleanup,
   previewMessageEdits,
+  previewToolInteractionDeletion,
   readRollout,
   readRolloutMetadata,
   readTurnMessageDetail,
@@ -79,7 +81,9 @@ import {
   readClaudeSessionDeletionBackupContent,
 } from './claude-session-delete.mjs';
 import {
+  applyClaudeToolInteractionDeletion,
   applyClaudeTurnDeletion,
+  previewClaudeToolInteractionDeletion,
   previewClaudeTurnDeletion,
   restoreClaudeTurnDeleteBackup,
 } from './claude-turn-delete.mjs';
@@ -897,7 +901,6 @@ export function createCleanerServer(options = {}) {
           label: body.mode === 'truncate' ? '从选中轮次清理 Claude 会话' : '删除选中 Claude 轮次',
           sessionIds: [sessionId],
           details: { turnId, mode: body.mode },
-          details: { turnId },
         }, () => applyClaudeTurnDeletion(claudeHome, sessionId, turnId, {
           mode: body.mode,
           sourceHash: body.sourceHash,
@@ -912,6 +915,36 @@ export function createCleanerServer(options = {}) {
             backupDir: value.backup.backupDir,
             expectedCurrentHash: value.sourceHashAfter,
           },
+        }));
+        claudeRegistryCache = null;
+        sendJson(response, 200, result);
+        return;
+      }
+
+      const claudeToolDeleteMatch = requestUrl.pathname.match(/^\/api\/claude-code\/sessions\/([^/]+)\/turns\/([^/]+)\/tools\/([^/]+)\/delete-(preview|apply)$/);
+      if (claudeToolDeleteMatch && request.method === 'POST') {
+        const body = await readJsonRequest(request);
+        const sessionId = decodeURIComponent(claudeToolDeleteMatch[1]);
+        const turnId = decodeURIComponent(claudeToolDeleteMatch[2]);
+        const toolUseId = decodeURIComponent(claudeToolDeleteMatch[3]);
+        if (claudeToolDeleteMatch[4] === 'preview') {
+          sendJson(response, 200, await previewClaudeToolInteractionDeletion(claudeHome, sessionId, turnId, toolUseId, { backupRoot: claudeTurnBackupRoot }));
+          return;
+        }
+        if (body.confirmation !== 'DELETE') {
+          throw new CleanerError('CLAUDE_TOOL_DELETE_CONFIRMATION_REQUIRED', 'Type DELETE to remove this Claude tool interaction.', 400);
+        }
+        const result = await executeRecordedOperation({
+          kind: 'claude_tool_interaction_delete',
+          label: '删除 Claude 工具交互',
+          sessionIds: [sessionId],
+          details: { turnId, toolUseId },
+        }, () => applyClaudeToolInteractionDeletion(claudeHome, sessionId, turnId, toolUseId, {
+          sourceHash: body.sourceHash,
+          backupRoot: claudeTurnBackupRoot,
+        }), (value) => ({
+          result: { deleted: value.deleted, claudeRefreshRecommended: value.claudeRefreshRecommended },
+          undo: { type: 'claude_turn_delete_restore', backupDir: value.backup.backupDir, expectedCurrentHash: value.sourceHashAfter },
         }));
         claudeRegistryCache = null;
         sendJson(response, 200, result);
@@ -1573,6 +1606,53 @@ export function createCleanerServer(options = {}) {
           ...result,
           targetSessionLock: await inspectTargetSessionLocks(codexHome, [sessionId]),
         });
+        return;
+      }
+
+      const codexToolDeleteMatch = requestUrl.pathname.match(/^\/api\/sessions\/([^/]+)\/turns\/([^/]+)\/tools\/([^/]+)\/delete-(preview|apply)$/);
+      if (codexToolDeleteMatch && request.method === 'POST') {
+        const body = await readJsonRequest(request);
+        const sessionId = decodeURIComponent(codexToolDeleteMatch[1]);
+        const turnId = decodeURIComponent(codexToolDeleteMatch[2]);
+        const callId = decodeURIComponent(codexToolDeleteMatch[3]);
+        const sessions = await loadSessions();
+        const { rolloutPath } = await resolveMutationTarget(codexHome, { sessionId }, sessions);
+        const selector = body.selector ? requireSelector(body) : { turnId };
+        if (codexToolDeleteMatch[4] === 'preview') {
+          sendJson(response, 200, {
+            ...await previewToolInteractionDeletion({ rolloutPath, selector, callId, backupRoot }),
+            targetSessionLock: await inspectTargetSessionLocks(codexHome, [sessionId]),
+          });
+          return;
+        }
+        if (body.confirmation !== 'DELETE') {
+          throw new CleanerError('TOOL_DELETE_CONFIRMATION_REQUIRED', 'Type DELETE to remove this Codex tool interaction.', 400);
+        }
+        const result = await executeRecordedOperation({
+          kind: 'tool_interaction_delete',
+          label: '删除 Codex 工具交互',
+          sessionIds: [sessionId],
+          details: { turnId, callId },
+        }, () => applyToolInteractionDeletion({
+          codexHome,
+          sessionId,
+          rolloutPath,
+          selector,
+          callId,
+          sourceHash: body.sourceHash,
+          backupRoot,
+        }), (value) => ({
+          result: { deleted: value.deleted, codexRefreshRecommended: true },
+          undo: {
+            type: 'rollout_restore',
+            sessionId,
+            rolloutPath: value.rolloutPath,
+            backupPath: value.backupFile,
+            expectedCurrentHash: value.sourceHashAfter,
+          },
+        }));
+        registryCache = null;
+        sendJson(response, 200, result);
         return;
       }
 

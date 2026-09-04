@@ -346,6 +346,8 @@ function findTurn(records, selector) {
 }
 
 const VISIBLE_ASSISTANT_PHASES = new Set([null, 'commentary', 'final_answer', 'final']);
+const TOOL_CALL_TYPES = new Set(['function_call', 'custom_tool_call', 'tool_search_call']);
+const TOOL_RESULT_TYPES = new Set(['function_call_output', 'custom_tool_call_output', 'tool_search_output']);
 
 function getMessageLocation(data) {
   const candidates = [
@@ -358,6 +360,116 @@ function getMessageLocation(data) {
     && typeof candidate.container?.role === 'string'
     && Array.isArray(candidate.container?.content)
   )) || null;
+}
+
+function getToolLocation(data) {
+  const candidates = [
+    { container: data?.payload, path: ['payload'] },
+    { container: data?.item, path: ['item'] },
+    { container: data?.payload?.item, path: ['payload', 'item'] },
+    { container: data, path: [] },
+  ];
+  return candidates.find(({ container }) => (
+    TOOL_CALL_TYPES.has(container?.type) || TOOL_RESULT_TYPES.has(container?.type)
+  )) || null;
+}
+
+function toolIdentifier(container) {
+  return container?.call_id || container?.id || null;
+}
+
+function codexEditablePartsForRecord(record, recordIndex) {
+  const messageLocation = getMessageLocation(record.data);
+  if (messageLocation) {
+    const { container } = messageLocation;
+    const expectedType = container.role === 'user' ? 'input_text' : 'output_text';
+    if (container.role !== 'user' && container.role !== 'assistant') return [];
+    return container.content.flatMap((content, contentIndex) => {
+      if (content?.type !== expectedType || typeof content.text !== 'string') return [];
+      return [{
+        targetId: `${recordIndex}:${contentIndex}`,
+        contentIndex,
+        type: content.type,
+        text: content.text,
+        label: container.role === 'user' ? '用户消息' : '模型回复',
+        locator: { kind: 'message_text', containerPath: messageLocation.path, contentIndex },
+      }];
+    });
+  }
+
+  const toolLocation = getToolLocation(record.data);
+  if (!toolLocation) {
+    const type = getRecordType(record.data);
+    if ((type === 'agent_message' || type === 'user_message') && typeof record.data?.payload?.message === 'string') {
+      return [{
+        targetId: `${recordIndex}:event:message`,
+        text: record.data.payload.message,
+        label: type === 'agent_message' ? 'Codex 事件消息' : '用户事件消息',
+        locator: { kind: 'record_text', valuePath: ['payload', 'message'] },
+      }];
+    }
+    if (type === 'reasoning') {
+      const summaryPath = record.data?.payload?.summary !== undefined ? ['payload', 'summary'] : ['summary'];
+      let summary = record.data;
+      for (const key of summaryPath) summary = summary?.[key];
+      if (typeof summary === 'string') {
+        return [{
+          targetId: `${recordIndex}:reasoning:summary`,
+          text: summary,
+          label: '推理摘要',
+          locator: { kind: 'record_text', valuePath: summaryPath },
+        }];
+      }
+      if (Array.isArray(summary)) {
+        return summary.flatMap((part, summaryIndex) => (typeof part?.text === 'string' ? [{
+          targetId: `${recordIndex}:reasoning:summary:${summaryIndex}`,
+          text: part.text,
+          label: summary.length > 1 ? `推理摘要 ${summaryIndex + 1}` : '推理摘要',
+          locator: { kind: 'record_text', valuePath: [...summaryPath, summaryIndex, 'text'] },
+        }] : []));
+      }
+    }
+    return [];
+  }
+  const { container } = toolLocation;
+  if (TOOL_CALL_TYPES.has(container.type)) {
+    const field = ['arguments', 'input', 'action'].find((candidate) => Object.hasOwn(container, candidate));
+    if (!field || container[field] == null) return [];
+    const json = typeof container[field] !== 'string';
+    const jsonString = field === 'arguments' && typeof container[field] === 'string';
+    return [{
+      targetId: `${recordIndex}:tool:${field}`,
+      text: json ? JSON.stringify(container[field], null, 2) : container[field],
+      label: json || jsonString ? '工具参数（JSON）' : '工具参数',
+      locator: { kind: json ? 'tool_json' : (jsonString ? 'tool_json_string' : 'tool_string'), containerPath: toolLocation.path, field },
+    }];
+  }
+
+  const field = Object.hasOwn(container, 'output') ? 'output' : (Object.hasOwn(container, 'result') ? 'result' : null);
+  if (!field || container[field] == null) return [];
+  const output = container[field];
+  if (typeof output === 'string') {
+    return [{
+      targetId: `${recordIndex}:tool:${field}`,
+      text: output,
+      label: '工具结果',
+      locator: { kind: 'tool_string', containerPath: toolLocation.path, field },
+    }];
+  }
+  if (Array.isArray(output) && output.length > 0 && output.every((part) => part && typeof part.text === 'string')) {
+    return output.map((part, outputIndex) => ({
+      targetId: `${recordIndex}:tool:${field}:${outputIndex}`,
+      text: part.text,
+      label: output.length > 1 ? `工具结果 ${outputIndex + 1}` : '工具结果',
+      locator: { kind: 'tool_output_text', containerPath: toolLocation.path, field, outputIndex },
+    }));
+  }
+  return [{
+    targetId: `${recordIndex}:tool:${field}`,
+    text: JSON.stringify(output, null, 2),
+    label: '工具结果（JSON）',
+    locator: { kind: 'tool_json', containerPath: toolLocation.path, field },
+  }];
 }
 
 function contextRecordText(data, location) {
@@ -436,12 +548,14 @@ function contextRecordLabel(data, location, typeOverride = null) {
 
 function fullContextRecord(record, recordIndex, turn) {
   const location = getMessageLocation(record.data);
+  const toolLocation = getToolLocation(record.data);
   const container = location?.container || null;
   const type = (
     record.data?.type === 'response_item'
     && typeof record.data?.payload?.type === 'string'
     && record.data.payload.type
   ) || getRecordType(record.data) || 'unknown';
+  const editableParts = recordIndex >= turn.startIndex ? codexEditablePartsForRecord(record, recordIndex) : [];
   return {
     recordIndex,
     lineNumber: record.lineNumber,
@@ -455,6 +569,10 @@ function fullContextRecord(record, recordIndex, turn) {
     timestamp: getRecordTimestamp(record.data),
     name: record.data?.payload?.name || record.data?.name || null,
     text: contextRecordText(record.data, location),
+    editableParts,
+    toolCalls: toolLocation && TOOL_CALL_TYPES.has(toolLocation.container.type) && toolIdentifier(toolLocation.container)
+      ? [{ id: toolIdentifier(toolLocation.container), name: toolLocation.container.name || 'unknown' }]
+      : [],
     raw: record.raw,
   };
 }
@@ -512,12 +630,50 @@ function collectTurnMessages(records, selector) {
   const turn = findTurn(records, selector);
   const messages = [];
   const targets = new Map();
+  const toolNames = new Map();
+
+  for (let recordIndex = turn.startIndex; recordIndex <= turn.endIndex; recordIndex += 1) {
+    const toolLocation = getToolLocation(records[recordIndex].data);
+    if (toolLocation && TOOL_CALL_TYPES.has(toolLocation.container.type)) {
+      const id = toolIdentifier(toolLocation.container);
+      if (id) toolNames.set(id, toolLocation.container.name || 'unknown');
+    }
+  }
 
   for (let recordIndex = turn.startIndex; recordIndex <= turn.endIndex; recordIndex += 1) {
     const record = records[recordIndex];
     const runtimeMessage = runtimeEventMessage(record, recordIndex);
     if (runtimeMessage) {
       messages.push(runtimeMessage);
+      continue;
+    }
+    const toolLocation = getToolLocation(record.data);
+    if (toolLocation) {
+      const id = toolIdentifier(toolLocation.container);
+      const isCall = TOOL_CALL_TYPES.has(toolLocation.container.type);
+      const parts = codexEditablePartsForRecord(record, recordIndex);
+      for (const part of parts) {
+        targets.set(part.targetId, {
+          ...part,
+          recordIndex,
+          lineNumber: record.lineNumber,
+          role: isCall ? 'tool_call' : 'tool_result',
+          phase: isCall ? 'tool_call' : 'tool_result',
+        });
+      }
+      const displayText = contextRecordText(record.data, null);
+      messages.push({
+        messageId: String(recordIndex),
+        recordIndex,
+        lineNumber: record.lineNumber,
+        role: isCall ? 'tool_call' : 'tool_result',
+        phase: isCall ? 'tool_call' : 'tool_result',
+        name: isCall ? (toolLocation.container.name || 'unknown') : (toolNames.get(id) || 'unknown'),
+        toolUseId: id,
+        text: displayText,
+        parts: parts.length ? parts : [{ targetId: `display:${recordIndex}`, text: displayText }],
+        editable: parts.length > 0,
+      });
       continue;
     }
     const location = getMessageLocation(record.data);
@@ -531,15 +687,8 @@ function collectTurnMessages(records, selector) {
 
     const expectedType = role === 'user' ? 'input_text' : 'output_text';
     const parts = [];
-    container.content.forEach((content, contentIndex) => {
-      if (content?.type !== expectedType || typeof content?.text !== 'string') return;
-      const targetId = `${recordIndex}:${contentIndex}`;
-      const part = {
-        targetId,
-        contentIndex,
-        type: content.type,
-        text: content.text,
-      };
+    codexEditablePartsForRecord(record, recordIndex).forEach((part) => {
+      const { targetId } = part;
       parts.push(part);
       targets.set(targetId, {
         ...part,
@@ -547,7 +696,6 @@ function collectTurnMessages(records, selector) {
         lineNumber: record.lineNumber,
         role,
         phase,
-        containerPath: location.path,
       });
     });
     if (!parts.length) continue;
@@ -697,6 +845,16 @@ function validateMessageEdits(records, selector, edits) {
         targetId: edit.targetId,
       });
     }
+    if (target.locator?.kind === 'tool_json' || target.locator?.kind === 'tool_json_string') {
+      try {
+        JSON.parse(edit.newText);
+      } catch (error) {
+        throw new CleanerError('INVALID_TOOL_EDIT_JSON', 'Tool parameters or results must remain valid JSON.', 400, {
+          targetId: edit.targetId,
+          cause: error.message,
+        });
+      }
+    }
     if (edit.newText === target.text) continue;
     validated.push({ target, newText: edit.newText });
   }
@@ -732,6 +890,41 @@ function setValueAtPath(root, objectPath, contentIndex, text) {
   container.content[contentIndex].text = text;
 }
 
+function setEditableTarget(root, target, text) {
+  const locator = target.locator;
+  if (!locator || locator.kind === 'message_text') {
+    setValueAtPath(root, locator?.containerPath || target.containerPath, locator?.contentIndex ?? target.contentIndex, text);
+    return;
+  }
+  if (locator.kind === 'record_text') {
+    let container = root;
+    for (const key of locator.valuePath.slice(0, -1)) container = container?.[key];
+    const key = locator.valuePath.at(-1);
+    if (!container || typeof container[key] !== 'string') {
+      throw new CleanerError('EDIT_TARGET_NOT_FOUND', 'The editable stored text no longer exists.', 409);
+    }
+    container[key] = text;
+    return;
+  }
+  let container = root;
+  for (const key of locator.containerPath) container = container?.[key];
+  if (!container) throw new CleanerError('EDIT_TARGET_NOT_FOUND', 'The editable tool target no longer exists.', 409);
+  if (locator.kind === 'tool_string' || locator.kind === 'tool_json_string') {
+    container[locator.field] = text;
+    return;
+  }
+  if (locator.kind === 'tool_json') {
+    container[locator.field] = JSON.parse(text);
+    return;
+  }
+  if (locator.kind === 'tool_output_text') {
+    if (!Array.isArray(container[locator.field]) || typeof container[locator.field][locator.outputIndex]?.text !== 'string') {
+      throw new CleanerError('EDIT_TARGET_NOT_FOUND', 'The editable tool result no longer exists.', 409);
+    }
+    container[locator.field][locator.outputIndex].text = text;
+  }
+}
+
 function editMessageRecords(records, selector, edits) {
   const { validated } = validateMessageEdits(records, selector, edits);
   const editedRecords = records.slice();
@@ -748,7 +941,7 @@ function editMessageRecords(records, selector, edits) {
       editedRecords[target.recordIndex] = editedRecord;
       clonedRecords.set(target.recordIndex, editedRecord);
     }
-    setValueAtPath(editedRecord.data, target.containerPath, target.contentIndex, newText);
+    setEditableTarget(editedRecord.data, target, newText);
   }
 
   return editedRecords;
@@ -977,6 +1170,138 @@ export async function applyMessageEdits(options) {
       throw error;
     }
     throw new CleanerError('MESSAGE_EDIT_FAILED', 'Editing messages failed; the original rollout was restored where possible.', 500, {
+      cause: error.message,
+      backupFile,
+      rollbackErrors,
+    });
+  }
+}
+
+function toolInteraction(records, selector, callId) {
+  if (typeof callId !== 'string' || !callId) {
+    throw new CleanerError('INVALID_TOOL_CALL_ID', 'A tool call ID is required.', 400);
+  }
+  const turn = findTurn(records, selector);
+  const calls = [];
+  const results = [];
+  for (let recordIndex = turn.startIndex; recordIndex <= turn.endIndex; recordIndex += 1) {
+    const location = getToolLocation(records[recordIndex].data);
+    if (!location) continue;
+    if (TOOL_CALL_TYPES.has(location.container.type) && toolIdentifier(location.container) === callId) {
+      calls.push({ recordIndex, record: records[recordIndex], container: location.container });
+    } else if (TOOL_RESULT_TYPES.has(location.container.type) && location.container.call_id === callId) {
+      results.push({ recordIndex, record: records[recordIndex], container: location.container });
+    }
+  }
+  if (!calls.length) {
+    throw new CleanerError('TOOL_CALL_NOT_FOUND', 'The selected Codex tool call was not found in this turn.', 404, { callId });
+  }
+  return {
+    turn,
+    callId,
+    name: calls[0].container.name || 'unknown',
+    calls,
+    results,
+  };
+}
+
+export function buildToolInteractionDeletePreview(records, selector, callId) {
+  const interaction = toolInteraction(records, selector, callId);
+  return {
+    turn: interaction.turn,
+    toolUseId: interaction.callId,
+    name: interaction.name,
+    callBlockCount: interaction.calls.length,
+    resultBlockCount: interaction.results.length,
+    affectedRecordCount: new Set([...interaction.calls, ...interaction.results].map(({ recordIndex }) => recordIndex)).size,
+    externalArtifacts: { toolResultFiles: [], subagents: [] },
+  };
+}
+
+function deleteToolInteractionRecords(records, selector, callId) {
+  const interaction = toolInteraction(records, selector, callId);
+  const removed = new Set([...interaction.calls, ...interaction.results].map(({ recordIndex }) => recordIndex));
+  return { interaction, records: records.filter((_, recordIndex) => !removed.has(recordIndex)) };
+}
+
+export async function previewToolInteractionDeletion({ rolloutPath, selector, callId, backupRoot }) {
+  const source = await readFile(rolloutPath, 'utf8');
+  return {
+    ...buildToolInteractionDeletePreview(parseJsonl(source, rolloutPath), selector, callId),
+    sourceHash: hashRolloutSource(source),
+    backupRoot,
+  };
+}
+
+export async function applyToolInteractionDeletion(options) {
+  const { rolloutPath, codexHome, sessionId, selector, callId, sourceHash, backupRoot, now = new Date() } = options;
+  if (codexHome && sessionId && !options.sessionLocksHeld) {
+    return withTargetSessionLocks(codexHome, [sessionId], {
+      ...options,
+      errorFactory: (code, message, status, details) => new CleanerError(code, message, status, details),
+    }, () => applyToolInteractionDeletion({ ...options, sessionLocksHeld: true }));
+  }
+  const source = await readFile(rolloutPath, 'utf8');
+  const sourceHashBefore = requireMatchingSourceHash(source, sourceHash);
+  const records = parseJsonl(source, rolloutPath);
+  const { interaction, records: editedRecords } = deleteToolInteractionRecords(records, selector, callId);
+  const backup = await createBackup({ files: [rolloutPath], backupRoot, label: 'codex-tool-interaction-delete', now });
+  const backupFile = backup.copied[0]?.backup;
+  if (!backupFile) throw new CleanerError('BACKUP_FAILED', 'The rollout could not be backed up.', 500, { rolloutPath });
+  const threadHistory = codexHome && sessionId
+    ? await prepareThreadHistoryMutation(codexHome, [sessionId], backup.backupDir, options)
+    : null;
+  const newline = source.includes('\r\n') ? '\r\n' : '\n';
+  const trailingNewline = /\r?\n$/.test(source);
+  const editedSource = serializeJsonlPreservingRaw(editedRecords, { newline, trailingNewline });
+  let changed = false;
+  try {
+    await writeFileAtomically(rolloutPath, editedSource);
+    changed = true;
+    const validatedSource = await readFile(rolloutPath, 'utf8');
+    const validationRecords = parseJsonl(validatedSource, rolloutPath);
+    try {
+      toolInteraction(validationRecords, selector, callId);
+      throw new CleanerError('TOOL_DELETE_VERIFY_FAILED', 'The selected Codex tool interaction still exists after rewriting the rollout.', 500);
+    } catch (error) {
+      if (error?.code !== 'TOOL_CALL_NOT_FOUND') throw error;
+    }
+    const historyInvalidation = codexHome && sessionId
+      ? await invalidateThreadHistory(codexHome, [sessionId], options)
+      : null;
+    if (typeof options.onThreadHistoryInvalidated === 'function') {
+      await options.onThreadHistoryInvalidated({ rolloutPath, validatedSource, historyInvalidation });
+    }
+    return {
+      rolloutPath,
+      backupDir: backup.backupDir,
+      backupFile,
+      backup,
+      deleted: {
+        toolUseId: interaction.callId,
+        name: interaction.name,
+        callBlocks: interaction.calls.length,
+        resultBlocks: interaction.results.length,
+        toolResultFiles: 0,
+        subagents: 0,
+      },
+      sourceHashBefore,
+      sourceHashAfter: hashRolloutSource(validatedSource),
+      threadHistory: { ...threadHistory, invalidation: historyInvalidation },
+      codexRefreshRecommended: true,
+    };
+  } catch (error) {
+    const rollbackErrors = [];
+    if (changed) {
+      try { await writeFileAtomically(rolloutPath, source); } catch (rollbackError) {
+        rollbackErrors.push({ path: rolloutPath, message: rollbackError.message });
+      }
+    }
+    if (error instanceof CleanerError) {
+      error.details = { ...error.details, backupFile, rollbackErrors };
+      throw error;
+    }
+    throw new CleanerError('TOOL_DELETE_FAILED', 'Deleting the Codex tool interaction failed; the original rollout was restored where possible.', 500, {
       cause: error.message,
       backupFile,
       rollbackErrors,

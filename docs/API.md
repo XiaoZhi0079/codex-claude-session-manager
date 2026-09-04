@@ -10,6 +10,10 @@
 | GET | `/api/sessions` | 重新扫描并返回目录、会话和汇总 |
 | GET | `/api/sessions/:id/health` | 会话完整性与来源诊断 |
 | GET | `/api/sessions/:id/turns` | 解析会话轮次；分页历史数据库异常时仍返回 rollout 正文，并在 `threadHistory` 标注降级原因 |
+| POST | `/api/claude-code/sessions/:id/turns/:turnId/tools/:toolUseId/delete-preview` | 预览 Claude 工具交互的调用块、配对结果与关联外置产物 |
+| POST | `/api/claude-code/sessions/:id/turns/:turnId/tools/:toolUseId/delete-apply` | 备份并原子删除 Claude 工具交互，可通过操作历史回退 |
+| POST | `/api/sessions/:id/turns/:turnId/tools/:callId/delete-preview` | 预览 Codex 工具调用与配对结果记录 |
+| POST | `/api/sessions/:id/turns/:turnId/tools/:callId/delete-apply` | 备份并原子删除 Codex 工具交互，使分页历史失效并支持回退 |
 | POST | `/api/turn-detail` | 读取紧凑轮次消息 |
 | POST | `/api/full-context` | 完整上下文筛选、分页与定位 |
 | POST | `/api/full-context/export` | 导出 JSONL 或 Markdown |

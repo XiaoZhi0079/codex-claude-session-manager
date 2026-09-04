@@ -6,8 +6,11 @@ import test from 'node:test';
 
 import {
   applyCleanup,
+  applyMessageEdits,
+  applyToolInteractionDeletion,
   buildCompactConversationPreview,
   buildFullContextDetail,
+  buildToolInteractionDeletePreview,
   buildTurnMessageDetail,
   mergeThreadHistoryTurnRows,
   CLEANUP_MODES,
@@ -15,6 +18,8 @@ import {
   hashRolloutSource,
   listTurnsFromRecords,
   parseJsonl,
+  previewMessageEdits,
+  restoreRolloutBackup,
 } from '../src/core.mjs';
 
 function jsonl(values) {
@@ -260,4 +265,102 @@ test('cleanup requires the preview hash and preserves untouched raw lines', asyn
     }),
     (error) => error?.code === 'STALE_ROLLOUT',
   );
+});
+
+function codexToolFixture() {
+  return [
+    { type: 'session_meta', payload: { id: 'tool-session' } },
+    { type: 'event_msg', payload: { type: 'task_started', turn_id: 'tool-turn' } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'inspect it' }] } },
+    { type: 'response_item', payload: { type: 'function_call', name: 'read_file', arguments: '{"path":"before.txt"}', call_id: 'call-1' } },
+    {
+      type: 'response_item',
+      payload: {
+        type: 'function_call_output',
+        call_id: 'call-1',
+        output: [{ type: 'input_text', text: 'first line' }, { type: 'input_text', text: 'second line' }],
+      },
+    },
+    { type: 'response_item', payload: { type: 'reasoning', summary: [{ type: 'summary_text', text: 'stored summary' }] } },
+    { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'done' }] } },
+    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'tool-turn' } },
+  ];
+}
+
+test('Codex compact and stored views expose editable tool calls and results in client order', () => {
+  const records = parseJsonl(jsonl(codexToolFixture()));
+  const detail = buildTurnMessageDetail(records, { turnId: 'tool-turn' });
+  assert.deepEqual(detail.messages.map((message) => message.role), ['user', 'tool_call', 'tool_result', 'assistant']);
+  assert.equal(detail.messages[1].name, 'read_file');
+  assert.equal(detail.messages[1].toolUseId, 'call-1');
+  assert.equal(detail.messages[1].parts[0].text, '{"path":"before.txt"}');
+  assert.deepEqual(detail.messages[2].parts.map((part) => part.text), ['first line', 'second line']);
+
+  const context = buildFullContextDetail(records, { turnId: 'tool-turn' }, { offset: 0, limit: 20 });
+  const callRecord = context.records.find((record) => record.type === 'function_call');
+  const resultRecord = context.records.find((record) => record.type === 'function_call_output');
+  assert.equal(callRecord.editableParts.length, 1);
+  assert.deepEqual(callRecord.toolCalls, [{ id: 'call-1', name: 'read_file' }]);
+  assert.equal(resultRecord.editableParts.length, 2);
+  assert.equal(context.records.find((record) => record.type === 'reasoning').editableParts[0].text, 'stored summary');
+});
+
+test('Codex tool fields can be edited, invalid JSON is rejected, and an interaction can be deleted and restored', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'codex-tool-edit-'));
+  const rolloutPath = path.join(temp, 'rollout-tool-session.jsonl');
+  const backupRoot = path.join(temp, 'backups');
+  const source = jsonl(codexToolFixture());
+  await writeFile(rolloutPath, source, 'utf8');
+  const records = parseJsonl(source);
+  const detail = buildTurnMessageDetail(records, { turnId: 'tool-turn' });
+  const callPart = detail.messages.find((message) => message.role === 'tool_call').parts[0];
+  const resultPart = detail.messages.find((message) => message.role === 'tool_result').parts[0];
+
+  await assert.rejects(
+    previewMessageEdits({
+      rolloutPath,
+      selector: { turnId: 'tool-turn' },
+      sourceHash: hashRolloutSource(source),
+      edits: [{ targetId: callPart.targetId, expectedText: callPart.text, newText: '{broken' }],
+    }),
+    (error) => error?.code === 'INVALID_TOOL_EDIT_JSON',
+  );
+
+  const edited = await applyMessageEdits({
+    rolloutPath,
+    selector: { turnId: 'tool-turn' },
+    sourceHash: hashRolloutSource(source),
+    backupRoot,
+    edits: [
+      { targetId: callPart.targetId, expectedText: callPart.text, newText: '{"path":"after.txt"}' },
+      { targetId: resultPart.targetId, expectedText: resultPart.text, newText: 'edited first line' },
+    ],
+  });
+  const editedRecords = parseJsonl(await readFile(rolloutPath, 'utf8'));
+  assert.equal(editedRecords[3].data.payload.arguments, '{"path":"after.txt"}');
+  assert.equal(editedRecords[4].data.payload.output[0].text, 'edited first line');
+
+  const deletionPreview = buildToolInteractionDeletePreview(editedRecords, { turnId: 'tool-turn' }, 'call-1');
+  assert.equal(deletionPreview.callBlockCount, 1);
+  assert.equal(deletionPreview.resultBlockCount, 1);
+  const editedSource = await readFile(rolloutPath, 'utf8');
+  const deleted = await applyToolInteractionDeletion({
+    rolloutPath,
+    selector: { turnId: 'tool-turn' },
+    callId: 'call-1',
+    sourceHash: hashRolloutSource(editedSource),
+    backupRoot,
+  });
+  const afterDelete = await readFile(rolloutPath, 'utf8');
+  assert.doesNotMatch(afterDelete, /call-1/);
+  assert.match(afterDelete, /"done"/);
+
+  await restoreRolloutBackup({
+    rolloutPath,
+    backupPath: deleted.backupFile,
+    backupRoot,
+    expectedCurrentHash: deleted.sourceHashAfter,
+  });
+  assert.match(await readFile(rolloutPath, 'utf8'), /call-1/);
+  assert.ok(edited.backupFile);
 });

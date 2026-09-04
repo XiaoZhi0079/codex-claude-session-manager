@@ -6,7 +6,9 @@ import test from 'node:test';
 
 import { buildClaudeSessionRegistry, readClaudeSessionTurns } from '../src/claude-sessions.mjs';
 import {
+  applyClaudeToolInteractionDeletion,
   applyClaudeTurnDeletion,
+  previewClaudeToolInteractionDeletion,
   previewClaudeTurnDeletion,
   restoreClaudeTurnDeleteBackup,
 } from '../src/claude-turn-delete.mjs';
@@ -202,6 +204,70 @@ test('sourceHash 不匹配时拒绝应用删除', async () => {
       }),
       (error) => error.code === 'CLAUDE_TURN_STALE_ROLLOUT',
     );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('工具交互删除会原子移除调用、配对结果和外置输出，并可完整撤销', async () => {
+  const fixture = await createFixture();
+  try {
+    const mainFile = path.join(fixture.claudeHome, 'projects', 'D--Work-Demo', `${SESSION_ID}.jsonl`);
+    const original = await readFile(mainFile, 'utf8');
+    const listed = await readClaudeSessionTurns(fixture.claudeHome, SESSION_ID);
+    const turn = listed.turns[0];
+    const preview = await previewClaudeToolInteractionDeletion(fixture.claudeHome, SESSION_ID, turn.turnId, 'toolu_bash', {
+      backupRoot: path.join(fixture.root, 'backups'),
+    });
+    assert.equal(preview.callBlockCount, 1);
+    assert.equal(preview.resultBlockCount, 1);
+    assert.equal(preview.affectedRecordCount, 2);
+    assert.equal(preview.externalArtifacts.toolResultFiles.length, 1);
+
+    const result = await applyClaudeToolInteractionDeletion(fixture.claudeHome, SESSION_ID, turn.turnId, 'toolu_bash', {
+      sourceHash: preview.sourceHash,
+      backupRoot: path.join(fixture.root, 'backups'),
+    });
+    const edited = (await readFile(mainFile, 'utf8')).trim().split(/\r?\n/).map(JSON.parse);
+    assert.equal(edited.length, 11);
+    assert.equal(edited.some((record) => record.message?.content?.some?.((block) => block.id === 'toolu_bash' || block.tool_use_id === 'toolu_bash')), false);
+    assert.equal(edited.find((record) => record.uuid === 'a1').message.content.length, 0);
+    assert.equal(edited.find((record) => record.uuid === 'u2').message.content.length, 0);
+    assert.equal(edited.find((record) => record.uuid === 'a2').message.content[0].text, '检查完成。');
+    assert.equal(await exists(path.join(fixture.toolResultsDir, 'large.txt')), false);
+
+    await restoreClaudeTurnDeleteBackup(fixture.claudeHome, {
+      backupRoot: path.join(fixture.root, 'backups'),
+      backupDir: result.backup.backupDir,
+      expectedCurrentHash: result.sourceHashAfter,
+    });
+    assert.equal(await readFile(mainFile, 'utf8'), original);
+    assert.equal(await readFile(path.join(fixture.toolResultsDir, 'large.txt'), 'utf8'), '完整终端输出\n第二行');
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('子代理工具交互删除只清理匹配的子代理文件', async () => {
+  const fixture = await createFixture();
+  try {
+    const listed = await readClaudeSessionTurns(fixture.claudeHome, SESSION_ID);
+    const turn = listed.turns[1];
+    const preview = await previewClaudeToolInteractionDeletion(fixture.claudeHome, SESSION_ID, turn.turnId, 'toolu_agent', {
+      backupRoot: path.join(fixture.root, 'backups'),
+    });
+    assert.equal(preview.externalArtifacts.subagents.length, 1);
+    const result = await applyClaudeToolInteractionDeletion(fixture.claudeHome, SESSION_ID, turn.turnId, 'toolu_agent', {
+      sourceHash: preview.sourceHash,
+      backupRoot: path.join(fixture.root, 'backups'),
+    });
+    assert.equal(result.deleted.subagents, 1);
+    assert.equal(await exists(path.join(fixture.subagentsDir, `agent-${AGENT_ID}.jsonl`)), false);
+    assert.equal(await exists(path.join(fixture.subagentsDir, `agent-${AGENT_ID}.meta.json`)), false);
+    const after = await readClaudeSessionTurns(fixture.claudeHome, SESSION_ID);
+    assert.equal(after.turns.length, 2);
+    assert.equal(after.turns[0].toolCallCount, 1);
+    assert.equal(after.turns[1].toolCallCount, 0);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }

@@ -275,6 +275,9 @@ body.resizing-panels { cursor: col-resize; user-select: none; }
 .context-sensitive-badge { padding: 2px 6px; border: 1px solid color-mix(in oklab, var(--danger) 45%, var(--border)); border-radius: 999px; background: var(--danger-soft); color: var(--danger); font: 9px var(--font-mono); }
 .full-context-text { margin: 0; padding: 10px 11px; border: 0; background: var(--surface); color: var(--fg); font: 11.5px/1.7 var(--font-mono); overflow-wrap: anywhere; white-space: pre-wrap; }
 .full-context-text mark { border-radius: 2px; background: color-mix(in oklab, var(--warn) 38%, transparent); color: inherit; }
+.context-editable-parts { display: grid; gap: 1px; background: var(--border); }
+.context-editable-part { background: var(--surface); }
+.context-editable-label { display: block; margin: 0 0 5px; color: var(--muted); font: 10px var(--font-mono); }
 .large-context-text { border-top: 0; background: var(--surface); }
 .large-context-text summary { cursor: pointer; padding: 9px 11px; color: var(--accent-ink); font: 10.5px var(--font-mono); }
 .large-context-text pre { max-height: 560px; margin: 0; padding: 10px 11px; overflow: auto; border-top: 1px solid var(--border); background: var(--surface); color: var(--fg); font: 11.5px/1.7 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -282,12 +285,15 @@ body.resizing-panels { cursor: col-resize; user-select: none; }
 .full-context-raw summary { cursor: pointer; padding: 6px 10px; color: var(--muted); font: 10px var(--font-mono); }
 .full-context-raw pre { max-height: 520px; margin: 0; padding: 10px; overflow: auto; border-top: 1px solid var(--border); background: var(--bg); color: var(--muted); font: 10.5px/1.55 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .message-block { margin-bottom: 10px; padding: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+.message-block.role-tool_call { border-left: 3px solid var(--accent); }
+.message-block.role-tool_result { border-left: 3px solid var(--success); }
 .message-head { margin: 0; padding: 5px 10px; border-bottom: 1px solid var(--border); background: var(--surface-2); }
 .message-head strong { font: 10.5px var(--font-mono); }
 .message-head span { color: var(--faint); font: 10.5px var(--font-mono); }
 .message-part { padding: 9px 10px; }
 .message-part textarea { width: 100%; padding: 8px 10px; border: 1px solid transparent; border-radius: 6px; background: var(--surface-2); color: var(--fg); font: 12px/1.65 var(--font-mono); }
 .message-part textarea[readonly] { background: var(--surface-2); color: color-mix(in oklab, var(--fg) 86%, transparent); }
+.message-readonly-reason { margin: 7px 0 0; color: var(--faint); font: 10px/1.5 var(--font-mono); }
 .message-actions { margin-top: 6px; }
 .edit-actions { margin: 0 -14px; padding: 8px 14px; border-top: 1px solid var(--border); border-bottom: 0; background: var(--surface); }
 .edit-preview, .edit-result { margin-top: 12px; border: 1px solid var(--border); border-radius: 7px; padding: 12px; }

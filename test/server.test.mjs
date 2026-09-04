@@ -186,3 +186,40 @@ test('Codex turns remain readable when optional paginated history fails', async 
     await rm(temp, { recursive: true, force: true });
   }
 });
+
+test('Codex tool interaction REST API deletes paired records and operation history restores them', async () => {
+  const sessionId = '01a05dca-4389-72c0-b3ee-e21341450001';
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'codex-tool-delete-server-'));
+  const codexHome = path.join(temp, '.codex');
+  const rolloutPath = path.join(codexHome, 'sessions', '2026', '09', '04', `rollout-${sessionId}.jsonl`);
+  const backupRoot = path.join(temp, 'backups');
+  await mkdir(path.dirname(rolloutPath), { recursive: true });
+  const source = jsonl([
+    { type: 'session_meta', payload: { id: sessionId, cwd: temp, model_provider: 'openai' } },
+    { type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-tools' } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'run it' }] } },
+    { type: 'response_item', payload: { type: 'custom_tool_call', name: 'exec', input: 'status', call_id: 'call-api' } },
+    { type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: 'call-api', output: 'ok' } },
+    { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'finished' }] } },
+    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-tools' } },
+  ]);
+  await writeFile(rolloutPath, source, 'utf8');
+  const server = createCleanerServer({ codexHome, backupRoot, env: {} });
+  try {
+    const baseUrl = await listen(server);
+    const endpoint = `/api/sessions/${sessionId}/turns/turn-tools/tools/call-api`;
+    const preview = await request(baseUrl, `${endpoint}/delete-preview`, {});
+    assert.equal(preview.callBlockCount, 1);
+    assert.equal(preview.resultBlockCount, 1);
+    await request(baseUrl, `${endpoint}/delete-apply`, { sourceHash: preview.sourceHash, confirmation: 'DELETE' });
+    assert.doesNotMatch(await readFile(rolloutPath, 'utf8'), /call-api/);
+
+    const history = await request(baseUrl, '/api/operation-history?limit=10');
+    assert.equal(history.latest.kind, 'tool_interaction_delete');
+    await request(baseUrl, '/api/operation-history/undo-latest', { operationId: history.latest.id, confirmation: 'UNDO' });
+    assert.equal(await readFile(rolloutPath, 'utf8'), source);
+  } finally {
+    if (server.listening) await close(server);
+    await rm(temp, { recursive: true, force: true });
+  }
+});

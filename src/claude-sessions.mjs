@@ -83,6 +83,50 @@ function contentBlocks(record) {
   return [];
 }
 
+function editableRecordId(record) {
+  return String(record?.data?.uuid || record?.lineNumber);
+}
+
+export function claudeEditableTextParts(record) {
+  if (!record?.data) return [];
+  const id = editableRecordId(record);
+  const role = record.data?.message?.role || null;
+  const content = record.data?.message?.content;
+  if (typeof content === 'string') {
+    return [{ targetId: `${id}:0`, text: content, label: role === 'user' ? '用户消息' : '消息文本', locator: { kind: 'message_string' } }];
+  }
+  if (Array.isArray(content)) {
+    const parts = [];
+    content.forEach((block, blockIndex) => {
+      if (block?.type === 'text' && typeof block.text === 'string') {
+        parts.push({ targetId: `${id}:${blockIndex}`, text: block.text, label: role === 'assistant' ? 'Claude 文本' : '用户消息', locator: { kind: 'block_text', blockIndex } });
+      } else if (block?.type === 'tool_result') {
+        if (typeof block.content === 'string') {
+          parts.push({ targetId: `${id}:${blockIndex}:result`, text: block.content, label: '工具结果', locator: { kind: 'block_value', blockIndex, field: 'content' } });
+        } else if (block.content !== undefined) {
+          parts.push({ targetId: `${id}:${blockIndex}:result-json`, text: JSON.stringify(block.content, null, 2), label: '工具结果 · JSON', locator: { kind: 'block_json', blockIndex, field: 'content' } });
+        }
+      } else if (block?.type === 'tool_use') {
+        parts.push({
+          targetId: `${id}:${blockIndex}:input`,
+          text: JSON.stringify(block.input ?? {}, null, 2),
+          label: `工具参数${block.name ? ` · ${block.name}` : ''} · JSON`,
+          locator: { kind: 'block_json', blockIndex, field: 'input' },
+        });
+      }
+    });
+    return parts;
+  }
+  if (record.data.attachment && typeof record.data.attachment === 'object') {
+    return ['content', 'stdout', 'prompt', 'snippet']
+      .filter((key) => typeof record.data.attachment[key] === 'string')
+      .map((key) => ({ targetId: `${id}:attachment:${key}`, text: record.data.attachment[key], label: `落盘注入 · ${key}`, locator: { kind: 'attachment', key } }));
+  }
+  return ['prompt', 'summary', 'text', 'content', 'lastPrompt', 'aiTitle']
+    .filter((key) => typeof record.data[key] === 'string')
+    .map((key) => ({ targetId: `${id}:field:${key}`, text: record.data[key], label: `落盘字段 · ${key}`, locator: { kind: 'record_field', key } }));
+}
+
 function blockText(block) {
   if (!block || typeof block !== 'object') return '';
   if (block.type === 'text') return typeof block.text === 'string' ? block.text : '';
@@ -493,23 +537,74 @@ export async function readClaudeTurnDetail(claudeHome, sessionId, turnId) {
   const session = await findSession(claudeHome, sessionId);
   const turn = selectedTurn(session, turnId);
   const records = session._records.filter((record) => record.lineNumber >= turn.startLine && record.lineNumber <= turn.endLine);
+  const toolNames = new Map();
+  for (const record of records) {
+    for (const block of contentBlocks(record)) {
+      if (block.type === 'tool_use' && block.id) toolNames.set(block.id, block.name || 'unknown');
+    }
+  }
   const messages = [];
   for (const record of records) {
     const role = record.data?.message?.role;
     if (role !== 'user' && role !== 'assistant') continue;
-    const textParts = contentBlocks(record).filter((block) => block.type === 'text').map((block, index) => ({
-      targetId: `${record.data?.uuid || record.lineNumber}:${index}`,
-      text: blockText(block),
-    })).filter((part) => part.text);
-    if (!textParts.length) continue;
-    messages.push({ role, phase: role === 'assistant' ? 'final_answer' : null, lineNumber: record.lineNumber, parts: textParts });
+    const blocks = contentBlocks(record);
+    const editableParts = claudeEditableTextParts(record);
+    const external = blocks.some((block) => block.type === 'tool_result')
+      ? await externalOutputForRecord(session, record)
+      : null;
+    for (let blockIndex = 0; blockIndex < blocks.length; blockIndex += 1) {
+      const block = blocks[blockIndex];
+      if (block.type === 'text') {
+        if (role === 'user' && !isActualUserPrompt(record)) continue;
+        const part = editableParts.find((candidate) => (
+          candidate.locator.kind === 'message_string'
+          || (candidate.locator.kind === 'block_text' && candidate.locator.blockIndex === blockIndex)
+        ));
+        if (!part?.text) continue;
+        messages.push({
+          role,
+          phase: role === 'assistant' ? 'final_answer' : null,
+          lineNumber: record.lineNumber,
+          parts: [{ targetId: part.targetId, text: part.text, label: part.label }],
+        });
+      } else if (block.type === 'tool_use') {
+        const parts = editableParts
+          .filter((part) => part.locator.blockIndex === blockIndex)
+          .map(({ targetId, text, label }) => ({ targetId, text, label }));
+        messages.push({
+          role: 'tool_call',
+          phase: 'tool_call',
+          name: block.name || 'unknown',
+          toolUseId: block.id || null,
+          lineNumber: record.lineNumber,
+          editable: parts.length > 0,
+          parts: parts.length ? parts : [{ targetId: `display:${record.lineNumber}:${blockIndex}`, text: blockText(block) }],
+        });
+      } else if (block.type === 'tool_result') {
+        const name = toolNames.get(block.tool_use_id) || 'unknown';
+        const parts = external ? [] : editableParts
+          .filter((part) => part.locator.blockIndex === blockIndex)
+          .map(({ targetId, text, label }) => ({ targetId, text, label }));
+        messages.push({
+          role: 'tool_result',
+          phase: 'tool_result',
+          name,
+          toolUseId: block.tool_use_id || null,
+          lineNumber: record.lineNumber,
+          editable: parts.length > 0,
+          readOnlyReason: external ? '该结果保存在独立外置文件中，当前主会话编辑操作不会覆盖它。' : null,
+          externalOutput: external ? { path: external.path, sizeBytes: external.sizeBytes } : null,
+          parts: parts.length ? parts : [{ targetId: `display:${record.lineNumber}:${blockIndex}`, text: external?.text ?? blockText(block) }],
+        });
+      }
+    }
   }
   return {
     session: publicSession(session),
     turn,
     messages,
     messageCount: messages.length,
-    readOnly: true,
+    readOnly: false,
   };
 }
 
@@ -593,6 +688,10 @@ async function buildContextRecords(session, turn) {
     const role = record.data?.message?.role || null;
     const source = contextSource(record);
     const kinds = sensitiveKinds(text, record.raw);
+    const toolCallBlocks = contentBlocks(record).filter((block) => block.type === 'tool_use');
+    const editableParts = !external && record.lineNumber >= turn.startLine
+      ? claudeEditableTextParts(record).map(({ targetId, text: editableText, label }) => ({ targetId, text: editableText, label }))
+      : [];
     context.push({
       lineNumber: record.lineNumber,
       sourceLineNumber: record.lineNumber,
@@ -604,13 +703,15 @@ async function buildContextRecords(session, turn) {
       role,
       source,
       phase: null,
-      name: contentBlocks(record).find((block) => block.type === 'tool_use')?.name || null,
+      name: toolCallBlocks[0]?.name || null,
+      toolCalls: toolCallBlocks.filter((block) => block.id).map((block) => ({ id: block.id, name: block.name || 'unknown' })),
       turnId: session._turns.find((item) => record.lineNumber >= item.startLine && record.lineNumber <= item.endLine)?.turnId || null,
       category,
       scope: record.lineNumber >= turn.startLine ? 'current_turn' : 'history',
       hasSensitiveContent: kinds.length > 0,
       sensitiveKinds: kinds,
       externalOutput: external ? { path: external.path, sizeBytes: external.sizeBytes } : null,
+      editableParts,
     });
   }
   let syntheticLine = session._records.length + 1;
@@ -645,6 +746,7 @@ async function buildContextRecords(session, turn) {
         hasSensitiveContent: kinds.length > 0,
         sensitiveKinds: kinds,
         externalOutput: null,
+        editableParts: [],
       });
       syntheticLine += 1;
     }

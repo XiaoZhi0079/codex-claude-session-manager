@@ -28,6 +28,8 @@ test('Claude REST resources expose sessions, turns, compact detail and full cont
   await mkdir(projectDir, { recursive: true });
   await writeFile(path.join(projectDir, `${SESSION_ID}.jsonl`), [
     { type: 'user', uuid: 'u1', parentUuid: null, cwd: 'D:\\Demo', message: { role: 'user', content: 'API 测试' } },
+    { type: 'assistant', uuid: 'tool-call', parentUuid: 'u1', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tool-api', name: 'Bash', input: { command: 'echo ok' } }] } },
+    { type: 'user', uuid: 'tool-result', parentUuid: 'tool-call', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tool-api', content: 'ok' }] } },
     { type: 'assistant', uuid: 'a1', parentUuid: 'u1', message: { role: 'assistant', content: [{ type: 'text', text: '测试完成' }] } },
   ].map((value) => JSON.stringify(value)).join('\n') + '\n', 'utf8');
 
@@ -48,12 +50,26 @@ test('Claude REST resources expose sessions, turns, compact detail and full cont
 
     const detailResponse = await fetch(`${baseUrl}/api/claude-code/sessions/${SESSION_ID}/turns/${turnId}`);
     assert.equal(detailResponse.status, 200);
-    assert.equal((await detailResponse.json()).readOnly, true);
+    assert.equal((await detailResponse.json()).readOnly, false);
 
     const contextResponse = await fetch(`${baseUrl}/api/claude-code/sessions/${SESSION_ID}/context?turnId=${turnId}&category=message`);
     assert.equal(contextResponse.status, 200);
     const context = await contextResponse.json();
     assert.equal(context.detail.filteredRecordCount, 2);
+
+    const toolPreviewResponse = await fetch(`${baseUrl}/api/claude-code/sessions/${SESSION_ID}/turns/${turnId}/tools/tool-api/delete-preview`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    });
+    assert.equal(toolPreviewResponse.status, 200);
+    const toolPreview = await toolPreviewResponse.json();
+    assert.equal(toolPreview.resultBlockCount, 1);
+    const toolDeleteResponse = await fetch(`${baseUrl}/api/claude-code/sessions/${SESSION_ID}/turns/${turnId}/tools/tool-api/delete-apply`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sourceHash: toolPreview.sourceHash, confirmation: 'DELETE' }),
+    });
+    assert.equal(toolDeleteResponse.status, 200);
+    assert.equal((await toolDeleteResponse.json()).deleted.callBlocks, 1);
 
     const deletePreviewResponse = await fetch(`${baseUrl}/api/claude-code/session-deletions/preview`, {
       method: 'POST',

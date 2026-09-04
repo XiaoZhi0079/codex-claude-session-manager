@@ -69,6 +69,68 @@ function externalArtifactsForTurn(session, turn, startLine, endLine) {
   return { toolResultFiles, subagents };
 }
 
+function requireToolUseId(toolUseId) {
+  const value = String(toolUseId || '').trim();
+  if (!value || value.length > 500) throw new CleanerError('INVALID_CLAUDE_TOOL_USE_ID', 'A valid Claude tool-use ID is required.', 400);
+  return value;
+}
+
+function toolInteraction(session, turn, rawToolUseId) {
+  const toolUseId = requireToolUseId(rawToolUseId);
+  const calls = [];
+  const results = [];
+  for (const record of session._records) {
+    if (record.lineNumber < turn.startLine || record.lineNumber > turn.endLine) continue;
+    const content = record.data?.message?.content;
+    if (!Array.isArray(content)) continue;
+    content.forEach((block, blockIndex) => {
+      if (block?.type === 'tool_use' && block.id === toolUseId) calls.push({ record, block, blockIndex });
+      if (block?.type === 'tool_result' && block.tool_use_id === toolUseId) results.push({ record, block, blockIndex });
+    });
+  }
+  if (!calls.length) throw new CleanerError('CLAUDE_TOOL_CALL_NOT_FOUND', 'The selected Claude tool call was not found in this turn.', 404, { toolUseId });
+  const resultReferences = new Set();
+  for (const result of results) {
+    const text = typeof result.block.content === 'string' ? result.block.content : JSON.stringify(result.block.content ?? '');
+    for (const reference of session._persistedOutputs) {
+      if (reference.lineNumber === result.record.lineNumber && reference.reportedPath && text.includes(reference.reportedPath)) {
+        resultReferences.add(reference);
+      }
+    }
+  }
+  const subagents = session._subagents.filter((agent) => agent.metadata?.toolUseId === toolUseId);
+  return {
+    toolUseId,
+    name: calls[0].block.name || 'unknown',
+    calls,
+    results,
+    artifacts: {
+      toolResultFiles: [...resultReferences].filter((item) => item.actualPath).map((item) => ({ path: item.actualPath, lineNumber: item.lineNumber })),
+      subagents,
+    },
+  };
+}
+
+function rewriteWithoutToolInteraction(session, source, interaction) {
+  const affected = new Map();
+  for (const item of [...interaction.calls, ...interaction.results]) {
+    const indexes = affected.get(item.record.lineNumber) || new Set();
+    indexes.add(item.blockIndex);
+    affected.set(item.record.lineNumber, indexes);
+  }
+  const newline = source.includes('\r\n') ? '\r\n' : '\n';
+  const trailingNewline = /\r?\n$/.test(source);
+  const lines = session._records.map((record) => {
+    const removedIndexes = affected.get(record.lineNumber);
+    if (!removedIndexes) return record.raw;
+    const data = structuredClone(record.data);
+    data.message.content = data.message.content.filter((_, index) => !removedIndexes.has(index));
+    return JSON.stringify(data);
+  });
+  const body = lines.join(newline);
+  return trailingNewline ? `${body}${newline}` : body;
+}
+
 function computeRemoval(session, turn, mode) {
   const lastLine = session._records.length;
   const startLine = turn.startLine;
@@ -279,6 +341,123 @@ export async function applyClaudeTurnDeletion(claudeHome, sessionId, turnId, opt
       recordCount: removal.removedLineCount,
       toolResultFiles: artifacts.toolResultFiles.length,
       subagents: artifacts.subagents.length,
+    },
+    backup: { id: backup.id, backupDir: backup.backupDir, manifestPath: backup.manifestPath },
+    sourceHashBefore,
+    sourceHashAfter: hashRolloutSource(nextSource),
+    claudeRefreshRecommended: true,
+  };
+}
+
+export async function previewClaudeToolInteractionDeletion(claudeHome, sessionId, turnId, toolUseId, options = {}) {
+  const session = await findSession(claudeHome, sessionId);
+  const turn = selectedTurn(session, turnId);
+  const interaction = toolInteraction(session, turn, toolUseId);
+  const source = await readFile(session.filePath, 'utf8');
+  return {
+    session: publicSession(session),
+    turn,
+    toolUseId: interaction.toolUseId,
+    name: interaction.name,
+    sourceHash: hashRolloutSource(source),
+    callBlockCount: interaction.calls.length,
+    resultBlockCount: interaction.results.length,
+    affectedRecordCount: new Set([...interaction.calls, ...interaction.results].map((item) => item.record.lineNumber)).size,
+    externalArtifacts: {
+      toolResultFiles: interaction.artifacts.toolResultFiles.map((item) => ({ path: item.path, lineNumber: item.lineNumber })),
+      subagents: interaction.artifacts.subagents.map((agent) => ({ agentId: agent.agentId, jsonlPath: agent.jsonlPath, metaPath: agent.metaPath })),
+    },
+    backupRoot: turnDeletionBackupRoot(claudeHome, options),
+    claudeRefreshRecommended: true,
+  };
+}
+
+export async function applyClaudeToolInteractionDeletion(claudeHome, sessionId, turnId, toolUseId, options = {}) {
+  const session = await findSession(claudeHome, sessionId);
+  const turn = selectedTurn(session, turnId);
+  const source = await readFile(session.filePath, 'utf8');
+  const sourceHashBefore = hashRolloutSource(source);
+  if (typeof options.sourceHash !== 'string' || !options.sourceHash || sourceHashBefore !== options.sourceHash) {
+    throw new CleanerError('CLAUDE_TOOL_DELETE_STALE', 'The Claude session changed after the tool deletion was previewed. Reload and try again.', 409);
+  }
+  const interaction = toolInteraction(session, turn, toolUseId);
+  const nextSource = rewriteWithoutToolInteraction(session, source, interaction);
+  const files = [
+    { role: 'main_jsonl', path: session.filePath },
+    ...interaction.artifacts.toolResultFiles.map((item) => ({ role: 'tool_result', path: item.path })),
+    ...interaction.artifacts.subagents.flatMap((agent) => [
+      { role: 'subagent_jsonl', path: agent.jsonlPath },
+      ...(agent.metaPath ? [{ role: 'subagent_meta', path: agent.metaPath }] : []),
+    ]),
+  ];
+  const backup = await createTurnBackup(claudeHome, files, options);
+  let mainChanged = false;
+  const deletedFiles = [];
+  try {
+    await writeFileAtomically(session.filePath, nextSource);
+    mainChanged = true;
+    const verified = await findSession(claudeHome, sessionId);
+    const verifiedTurn = selectedTurn(verified, turnId);
+    try {
+      toolInteraction(verified, verifiedTurn, interaction.toolUseId);
+      throw new CleanerError('CLAUDE_TOOL_DELETE_VERIFY_FAILED', 'The selected tool interaction still exists after rewriting the Claude session.', 500);
+    } catch (error) {
+      if (error?.code !== 'CLAUDE_TOOL_CALL_NOT_FOUND') throw error;
+    }
+    for (const item of interaction.artifacts.toolResultFiles) {
+      assertManagedToolResult(claudeHome, session, item.path);
+      await rm(item.path, { force: false });
+      deletedFiles.push(item.path);
+    }
+    for (const agent of interaction.artifacts.subagents) {
+      if (agent.metaPath) {
+        assertManagedSubagent(claudeHome, session, agent, 'meta');
+        await rm(agent.metaPath, { force: false });
+        deletedFiles.push(agent.metaPath);
+      }
+      assertManagedSubagent(claudeHome, session, agent, 'jsonl');
+      await rm(agent.jsonlPath, { force: false });
+      deletedFiles.push(agent.jsonlPath);
+    }
+    backup.manifest.state = 'completed';
+    backup.manifest.deleted = {
+      toolUseId: interaction.toolUseId,
+      callBlockCount: interaction.calls.length,
+      resultBlockCount: interaction.results.length,
+      files: deletedFiles,
+    };
+    await writeFileAtomically(backup.manifestPath, `${JSON.stringify(backup.manifest, null, 2)}\n`);
+  } catch (error) {
+    const rollbackErrors = [];
+    try {
+      if (mainChanged) await writeFileAtomically(session.filePath, source);
+      for (const file of backup.manifest.files) {
+        const target = requireInside(claudeHome, path.join(claudeHome, file.sourceRelativePath), 'Claude tool rollback target');
+        const payload = requireInside(backup.backupDir, path.join(backup.backupDir, file.backupRelativePath), 'Claude tool backup payload');
+        await mkdir(path.dirname(target), { recursive: true });
+        await copyFile(payload, target);
+      }
+    } catch (rollbackError) {
+      rollbackErrors.push(rollbackError.message);
+    }
+    if (error instanceof CleanerError) {
+      error.details = { ...error.details, backupDir: backup.backupDir, rollbackErrors };
+      throw error;
+    }
+    throw new CleanerError('CLAUDE_TOOL_DELETE_FAILED', 'Deleting the Claude tool interaction failed; the session was restored where possible.', 500, {
+      cause: error.message,
+      backupDir: backup.backupDir,
+      rollbackErrors,
+    });
+  }
+  return {
+    deleted: {
+      toolUseId: interaction.toolUseId,
+      name: interaction.name,
+      callBlocks: interaction.calls.length,
+      resultBlocks: interaction.results.length,
+      toolResultFiles: interaction.artifacts.toolResultFiles.length,
+      subagents: interaction.artifacts.subagents.length,
     },
     backup: { id: backup.id, backupDir: backup.backupDir, manifestPath: backup.manifestPath },
     sourceHashBefore,

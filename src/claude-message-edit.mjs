@@ -3,15 +3,10 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 
 import { CleanerError, hashRolloutSource, writeFileAtomically } from './core.mjs';
-import { findSession, publicSession, selectedTurn } from './claude-sessions.mjs';
+import { claudeEditableTextParts, findSession, publicSession, selectedTurn } from './claude-sessions.mjs';
 
 function editRoot(claudeHome, options = {}) {
   return path.resolve(options.backupRoot || path.join(claudeHome, 'backups', 'codex-claude-session-manager-edits'));
-}
-
-function targetParts(record, blockIndex) {
-  const id = record.data?.uuid || record.lineNumber;
-  return `${id}:${blockIndex}`;
 }
 
 function collectParts(session, turn) {
@@ -19,16 +14,20 @@ function collectParts(session, turn) {
   for (const record of session._records) {
     if (record.lineNumber < turn.startLine || record.lineNumber > turn.endLine) continue;
     const role = record.data?.message?.role;
-    if (role !== 'user' && role !== 'assistant') continue;
-    const content = record.data?.message?.content;
-    if (!Array.isArray(content)) continue;
-    content.forEach((block, index) => {
-      if (block?.type === 'text' && typeof block.text === 'string') {
-        parts.push({ targetId: targetParts(record, index), lineNumber: record.lineNumber, role, text: block.text });
-      }
-    });
+    claudeEditableTextParts(record).forEach((part) => parts.push({ ...part, lineNumber: record.lineNumber, role }));
   }
   return parts;
+}
+
+function applyPartEdit(data, part, value) {
+  const locator = part.locator;
+  if (locator.kind === 'message_string') data.message.content = value;
+  else if (locator.kind === 'block_text') data.message.content[locator.blockIndex].text = value;
+  else if (locator.kind === 'block_value') data.message.content[locator.blockIndex][locator.field] = value;
+  else if (locator.kind === 'block_json') data.message.content[locator.blockIndex][locator.field] = JSON.parse(value);
+  else if (locator.kind === 'attachment') data.attachment[locator.key] = value;
+  else if (locator.kind === 'record_field') data[locator.key] = value;
+  else throw new CleanerError('CLAUDE_EDIT_TARGET_NOT_FOUND', 'The selected Claude text field is not editable.', 409);
 }
 
 function normalizeEdits(edits) {
@@ -49,7 +48,12 @@ export async function previewClaudeMessageEdits(claudeHome, sessionId, turnId, e
     const part = available.get(edit.targetId);
     if (!part) throw new CleanerError('CLAUDE_EDIT_TARGET_NOT_FOUND', 'The selected Claude message part was not found.', 404, { targetId: edit.targetId });
     if (part.text !== edit.expectedText) throw new CleanerError('CLAUDE_EDIT_STALE', 'The Claude message changed after it was loaded. Reload and try again.', 409);
-    return { ...edit, lineNumber: part.lineNumber, role: part.role, before: part.text, after: edit.newText };
+    if (part.locator.kind === 'block_json') {
+      try { JSON.parse(edit.newText); } catch (error) {
+        throw new CleanerError('INVALID_CLAUDE_EDIT_JSON', 'Tool parameters and structured results must remain valid JSON.', 400, { targetId: edit.targetId, technicalMessage: error.message });
+      }
+    }
+    return { ...edit, lineNumber: part.lineNumber, role: part.role, label: part.label, locator: part.locator, before: part.text, after: edit.newText };
   });
   return { session: publicSession(session), turn, changes, sourceHash: hashRolloutSource(source), backupRoot: editRoot(claudeHome, options) };
 }
@@ -60,16 +64,14 @@ export async function applyClaudeMessageEdits(claudeHome, sessionId, turnId, edi
   const turn = selectedTurn(session, turnId);
   const source = await readFile(session.filePath, 'utf8');
   if (options.sourceHash !== preview.sourceHash) throw new CleanerError('CLAUDE_EDIT_STALE', 'The Claude session changed after preview. Reload and try again.', 409);
-  const byTarget = new Map(preview.changes.map((change) => [change.targetId, change.after]));
+  const byTarget = new Map(preview.changes.map((change) => [change.targetId, change]));
   const records = session._records.map((record) => {
     if (record.lineNumber < turn.startLine || record.lineNumber > turn.endLine) return record.raw;
     const data = JSON.parse(record.raw);
-    const content = data?.message?.content;
-    if (!Array.isArray(content)) return record.raw;
     let changed = false;
-    content.forEach((block, index) => {
-      const targetId = targetParts(record, index);
-      if (byTarget.has(targetId) && block?.type === 'text') { block.text = byTarget.get(targetId); changed = true; }
+    claudeEditableTextParts(record).forEach((part) => {
+      const change = byTarget.get(part.targetId);
+      if (change) { applyPartEdit(data, { ...part, locator: change.locator }, change.after); changed = true; }
     });
     return changed ? JSON.stringify(data) : record.raw;
   });

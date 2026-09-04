@@ -90,7 +90,7 @@ test('Claude registry uses native title metadata and aggregates the complete ses
   }
 });
 
-test('Claude compact turns exclude tool-only user records and remain read-only', async () => {
+test('Claude compact turns mirror visible user, tool, result, and assistant blocks in order', async () => {
   const fixture = await createFixture();
   try {
     const listed = await readClaudeSessionTurns(fixture.claudeHome, SESSION_ID);
@@ -98,8 +98,25 @@ test('Claude compact turns exclude tool-only user records and remain read-only',
     assert.equal(listed.turns[0].summary, '检查项目');
     assert.equal(listed.turns[0].toolCallCount, 1);
     const detail = await readClaudeTurnDetail(fixture.claudeHome, SESSION_ID, listed.turns[0].turnId);
-    assert.equal(detail.readOnly, true);
-    assert.deepEqual(detail.messages.map((message) => message.parts[0].text), ['检查项目', '检查完成。']);
+    assert.equal(detail.readOnly, false);
+    assert.deepEqual(detail.messages.map((message) => message.role), ['user', 'tool_call', 'tool_result', 'assistant']);
+    assert.equal(detail.messages[0].parts[0].text, '检查项目');
+    assert.equal(detail.messages[1].name, 'Bash');
+    assert.match(detail.messages[1].parts[0].text, /large-output/);
+    assert.match(detail.messages[2].parts[0].text, /完整终端输出/);
+    assert.equal(detail.messages[1].editable, true);
+    assert.equal(detail.messages[1].parts[0].targetId, 'a1:0:input');
+    assert.equal(detail.messages[2].editable, false);
+    assert.match(detail.messages[2].readOnlyReason, /外置文件/);
+    assert.equal(detail.messages[2].externalOutput.sizeBytes > 0, true);
+    assert.equal(detail.messages[3].parts[0].text, '检查完成。');
+    assert.deepEqual([detail.messages[0].parts[0].targetId, detail.messages[3].parts[0].targetId], ['u1:0', 'a2:0']);
+
+    const second = await readClaudeTurnDetail(fixture.claudeHome, SESSION_ID, listed.turns[1].turnId);
+    assert.deepEqual(second.messages.map((message) => message.role), ['user', 'tool_call', 'tool_result', 'assistant']);
+    assert.equal(second.messages[1].editable, true);
+    assert.equal(second.messages[2].editable, true);
+    assert.equal(second.messages[2].parts[0].targetId, 'u4:0:result');
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -115,6 +132,14 @@ test('Claude full context resolves safe tool-results and includes linked subagen
     assert.equal(first.filteredRecordCount, 1);
     assert.match(first.records[0].text, /完整终端输出/);
     assert.equal(first.records[0].externalOutput.sizeBytes > 0, true);
+    assert.deepEqual(first.records[0].editableParts, []);
+
+    const toolInput = await readClaudeFullContext(fixture.claudeHome, SESSION_ID, listed.turns[0].turnId, {
+      category: 'tool_call',
+      scope: 'current_turn',
+    });
+    assert.equal(toolInput.records[0].editableParts[0].targetId, 'a1:0:input');
+    assert.match(toolInput.records[0].editableParts[0].text, /large-output/);
 
     const second = await readClaudeFullContext(fixture.claudeHome, SESSION_ID, listed.turns[1].turnId, {
       query: '子代理发现结果',
@@ -122,6 +147,7 @@ test('Claude full context resolves safe tool-results and includes linked subagen
     assert.equal(second.filteredRecordCount, 1);
     assert.equal(second.records[0].stream, `agent-${AGENT_ID}`);
     assert.equal(second.records[0].phase, 'subagent');
+    assert.deepEqual(second.records[0].editableParts, []);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
