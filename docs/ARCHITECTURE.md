@@ -13,12 +13,13 @@ Codex & Claude Code Session Manager 是本地单进程工具：Node.js HTTP 服�
 | `bin/codex-claude-session-manager.mjs` | 命令行参数、启动和退出处理 |
 | `src/server.mjs` | 静态页面、REST 路由、写操作审计和一键撤销编排 |
 | `src/registry.mjs` | 合并扫描会话来源、判定 Codex 可见性、供应商统一及逐项备份清单 |
-| `src/core.mjs` | JSONL 解析、轮次边界、消息编辑、轮次清理和 rollout 恢复 |
+| `src/core.mjs` | Codex JSONL 解析、轮次边界、消息与工具编辑、工具交互删除、轮次清理和 rollout 恢复 |
 | `src/codex-thread-history.mjs` | 目标会话 writer lock 探测/持有、分页历史数据库解析、备份与目标投影失效 |
 | `src/context-view.mjs` | 完整上下文分类、过滤、分页、定位和导出 |
 | `src/claude-sessions.mjs` | Claude Code 主会话扫描、标题解析、轮次、侧边数据、子代理、诊断与落盘上下文 |
 | `src/claude-session-delete.mjs` | Claude 完整会话包删除预览、指纹校验、备份、恢复与永久删除 |
-| `src/claude-turn-delete.mjs` | Claude 单轮对话删除预览、主 JSONL 与外置产物备份、字节保留重写与恢复 |
+| `src/claude-turn-delete.mjs` | Claude 单轮及单次工具交互删除、外置产物关联清理、备份与恢复 |
+| `src/claude-message-edit.mjs` | Claude 当前轮消息、工具参数和内嵌工具结果的定位、预览、写入与恢复 |
 | `src/session-health.mjs` | 单会话正文、标题、SQLite、供应商和备份诊断 |
 | `src/session-delete.mjs` | 整会话预览、单条/批量删除、删除备份管理和恢复 |
 | `src/operation-backup.mjs` | 轮次快照与系统备份的发现、删除、预览和恢复 |
@@ -51,6 +52,10 @@ Codex 与 Claude Code 是并列领域，不进行会话格式转换。Codex 会�
 Claude Code 的 `sessions-index.json` 只补充摘要标题和项目路径。`custom-title` 优先级最高；带 `isMeta`、`<local-command-*>` 或 `<command-name>` 的控制记录只在落盘模式显示，不参与精简标题和轮次边界。
 
 Claude JSONL 的 `message.role` 是传输信封角色，不等于内容来源：工具结果通常使用 `user` 信封，客户端事件也可能使用 `system` 类型。Claude 落盘模式因此额外计算 `source`，区分人类、Claude、工具、运行时注入、客户端事件和子代理。内置基础身份提示词存在于 Claude Code 运行时，不属于历史 JSONL 可恢复事实。
+
+精简模式不是简单抽取 `user`/`assistant` 文本，而是按主记录顺序还原客户端可见的消息、工具调用和工具结果。当前轮主 JSONL 中能稳定定位的文本、工具参数和内嵌结果可以编辑；历史记录、外置工具结果与子代理流只读。
+
+Claude Code 子代理位于主会话侧边目录，可通过 `metadata.toolUseId` 与一次工具调用精确关联；删除该工具交互时可以一并清理对应子代理 JSONL/meta。Codex 子代理是 SQLite `threads` 中具有 `source.subagent.thread_spawn.parent_thread_id` 的独立线程，目前没有稳定的工具 `call_id` 映射，因此父会话和工具交互删除默认保留这些子线程。
 
 Claude 删除把主 JSONL、`projects/<项目>/<sessionId>`、`tasks/<sessionId>`、`file-history/<sessionId>`、`session-env/<sessionId>` 和索引条目视为一个聚合。删除前逐项计算指纹并复制到工具专属备份目录，验证副本后才删除；恢复只写回缺失或完全一致的目标，拒绝覆盖不同内容。
 

@@ -26,7 +26,7 @@ Codex 轮次的 `status` 可为 `completed`、`failed` 或 `aborted`。`failed` 
 |---|---|---|
 | GET | `/api/claude-code/sessions` | 扫描全部 Claude Code 主会话并返回目录、诊断和空间汇总 |
 | GET | `/api/claude-code/sessions/:id/turns` | 返回真实用户对话轮次；排除本地命令控制记录 |
-| GET | `/api/claude-code/sessions/:id/turns/:turnId` | 返回只读精简消息 |
+| GET | `/api/claude-code/sessions/:id/turns/:turnId` | 按客户端可见顺序返回消息、工具调用与工具结果，并标注可编辑目标 |
 | GET | `/api/claude-code/sessions/:id/context` | 返回主记录、完整外置结果与关联子代理上下文 |
 
 上下文接口接受 `turnId`、`offset`、`limit`、`query`、`source`、`role`、`category`、`scope` 与 `lineNumber` 查询参数。`source` 是语义来源，支持 `human`、`claude`、`tool`、`runtime`、`client`、`subagent`；`role` 仅保留原始 JSONL 信封角色筛选。`limit` 范围为 1–200。
@@ -63,8 +63,13 @@ Claude Code 轮次删除：
 | POST | `/api/edit-restore` | `RESTORE` |
 | POST | `/api/preview` | 无 |
 | POST | `/api/apply` | `DELETE` |
+| POST | `/api/claude-code/sessions/:id/turns/:turnId/edit-preview` | 无 |
+| POST | `/api/claude-code/sessions/:id/turns/:turnId/edit-apply` | `EDIT` |
+| POST | `/api/claude-code/edit-restore` | `RESTORE` |
 
 清理 `mode` 为 `truncate`（从所选轮开始）或 `single`（只删除所选轮）。写入接口必须携带预览返回的 `sourceHash`。
+
+两端的精简模式都返回主会话中客户端可见的工具调用与结果。Codex 和 Claude Code 均允许编辑当前轮可稳定定位的消息、工具参数与内嵌结果；结构化字段必须保持合法 JSON。历史上下文、外置结果和子代理正文只读。
 
 Codex 编辑与清理预览会返回 `targetSessionLock`。若 `activeSessionIds` 非空，必须只关闭这些目标会话后重新预览；其他 Codex 窗口可以继续运行。成功写入会返回 `threadHistory`，其中包含写前状态、数据库备份和仅针对目标会话的投影失效统计。
 

@@ -15,6 +15,7 @@ Claude 删除只接受已扫描到的 UUID 会话，并把主 JSONL、会话侧�
 | 操作 | 并发保护 | 写前保护 | 失败恢复 | 一键撤销 |
 |---|---|---|---|---|
 | 消息编辑 | 目标 writer lock、rollout SHA-256 | rollout 与分页历史备份 | 写后解析失败时恢复原正文；投影由 Codex 重建 | 是，恢复编辑前 rollout |
+| Codex 工具交互删除 | 目标 writer lock、rollout SHA-256、轮次与 `call_id` 配对 | rollout 与分页历史备份 | 删除调用/结果记录；失败时恢复原正文 | 是；不级联删除独立子代理线程 |
 | 从所选轮开始清理 | 目标 writer lock、rollout SHA-256 | rollout 与分页历史备份 | 写后解析失败时恢复原正文；投影由 Codex 重建 | 是 |
 | 只删除所选轮 | 目标 writer lock、rollout SHA-256 | rollout 与分页历史备份 | 写后解析失败时恢复原正文；投影由 Codex 重建 | 是 |
 | 恢复某个 rollout 备份 | 目标 writer lock、当前 rollout SHA-256 | 恢复前 rollout 与分页历史快照 | 失败时恢复调用前正文；投影由 Codex 重建 | 是，可回到恢复前快照 |
@@ -28,6 +29,8 @@ Claude 删除只接受已扫描到的 UUID 会话，并把主 JSONL、会话侧�
 | Claude 单条/批量会话删除 | 会话包逐文件指纹、索引指纹、计划令牌 | 完整会话包与原索引 | 复制回全部已删数据并恢复索引 | 是，可从删除备份恢复 |
 | Claude 删除备份恢复 | 备份指纹、目标冲突、索引状态、计划令牌 | 只写入缺失目标，不覆盖不同内容 | 移除本次新写目标并恢复索引 | 历史中不嵌套开放 |
 | Claude 轮次删除 | 主 JSONL SHA-256（sourceHash） | 主 JSONL、该轮 tool-results 文件与子代理 JSONL/meta | 写回主 JSONL 并复制回全部外置产物 | 是，从轮次删除备份恢复 |
+| Claude 消息与工具编辑 | 主 JSONL SHA-256、稳定记录定位器、结构化 JSON 校验 | 主 JSONL | 写后重新解析，失败时恢复原正文 | 是，从操作历史回退 |
+| Claude 工具交互删除 | 主 JSONL SHA-256、`tool_use.id` / `tool_use_id` 配对 | 主 JSONL、精确关联的 tool-results 与子代理文件 | 保留记录外壳和消息链，失败时恢复全部产物 | 是，从操作历史回退 |
 | Codex 项目路径迁移 | rollout/SQLite/索引指纹、计划令牌、Codex 进程检测 | 待改 rollout、SQLite 与索引备份 | 文件恢复 + SQLite 事务回滚 | 是，恢复旧项目路径 |
 | Claude 项目路径迁移 | 主 JSONL/项目索引指纹、目标冲突、计划令牌 | 待迁移主 JSONL 与新旧索引备份 | 主文件与侧边目录移回旧项目存储并恢复索引 | 是，恢复旧项目路径 |
 | Codex 跨电脑会话导入 | 包格式、逐会话 SHA-256、项目指纹、ID 冲突、目标锁和计划令牌 | 导入清单及目标状态校验 | 文件写入失败时移除本次新增正文，SQLite 事务回滚 | 是；正文或索引变化后拒绝自动回退 |
