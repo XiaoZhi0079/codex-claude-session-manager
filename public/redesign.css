@@ -164,6 +164,15 @@ body.resizing-panels { cursor: col-resize; user-select: none; }
 
 .session-entry { display: grid; grid-template-columns: 28px minmax(0, 1fr) 48px; align-items: center; border: 0; margin-bottom: 2px; }
 .session-entry.claude-session-entry { grid-template-columns: 28px minmax(0, 1fr) 48px; }
+.session-entry.codex-session-entry { grid-template-columns: 28px 28px minmax(0, 1fr) 48px; }
+.session-tree-toggle {
+  width: 26px; min-width: 26px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; gap: 1px;
+  border-color: transparent; background: transparent; color: var(--muted); font: 16px/1 var(--font-mono);
+}
+.session-tree-toggle:hover { border-color: var(--border); background: var(--surface-2); color: var(--fg); }
+.session-tree-toggle small { color: var(--faint); font-size: 8px; }
+.session-tree-spacer { width: 26px; }
+.codex-session-entry.is-subagent .session-row { margin-left: var(--session-indent); border-left: 2px solid color-mix(in oklab, var(--accent) 32%, var(--border)); }
 .session-health-button.health-critical .health-dot { background: var(--danger); }
 .claude-storage-strip { display: flex; flex-wrap: wrap; gap: 4px 8px; margin-top: 4px; color: var(--faint); font: 10px var(--font-mono); }
 .session-entry > input { align-self: center; justify-self: center; }
@@ -174,6 +183,14 @@ body.resizing-panels { cursor: col-resize; user-select: none; }
 .session-row:hover { background: var(--surface-2); }
 .session-row.selected { background: var(--accent-soft); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent) 38%, transparent); }
 .session-title { color: var(--fg); font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.codex-session-entry .session-title { display: flex; align-items: center; gap: 5px; }
+.session-title-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-kind-badge { flex: 0 0 auto; padding: 1px 5px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font: 9px/1.5 var(--font-mono); }
+.subagent-inherited-banner {
+  display: grid; gap: 3px; margin: 5px 6px 7px; padding: 8px 9px; border: 1px solid color-mix(in oklab, var(--accent) 28%, var(--border));
+  border-radius: 6px; background: var(--accent-soft); color: var(--muted); font-size: 10.5px; line-height: 1.55;
+}
+.subagent-inherited-banner strong { color: var(--accent); font-size: 11px; }
 .session-project, .session-id { color: var(--faint); font: 11px var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-meta { color: var(--muted); font: 10.5px/1.6 var(--font-mono); white-space: normal; }
 .session-id { display: none; }
@@ -263,6 +280,7 @@ body.resizing-panels { cursor: col-resize; user-select: none; }
 .full-context-list { display: grid; gap: 8px; min-height: 140px; }
 .full-context-record { overflow: hidden; border: 1px solid var(--border); border-left: 3px solid var(--faint); border-radius: 7px; background: var(--surface); }
 .full-context-record.scope-current_turn { border-left-color: var(--accent); }
+.full-context-record.inherited-record { border-left-color: color-mix(in oklab, var(--accent) 45%, var(--border)); background: color-mix(in oklab, var(--accent-soft) 38%, var(--surface)); }
 .full-context-record.base-instructions { border-left-color: #8b5cf6; }
 .full-context-record.sensitive-record { border-color: color-mix(in oklab, var(--danger) 42%, var(--border)); border-left-color: var(--danger); }
 .full-context-record.jump-target { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -287,6 +305,8 @@ body.resizing-panels { cursor: col-resize; user-select: none; }
 .message-block { margin-bottom: 10px; padding: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
 .message-block.role-tool_call { border-left: 3px solid var(--accent); }
 .message-block.role-tool_result { border-left: 3px solid var(--success); }
+.message-block.role-subagent_task,
+.message-block.role-agent_message { border-left: 3px solid var(--warn); background: color-mix(in oklab, var(--warn) 5%, var(--surface)); }
 .message-head { margin: 0; padding: 5px 10px; border-bottom: 1px solid var(--border); background: var(--surface-2); }
 .message-head strong { font: 10.5px var(--font-mono); }
 .message-head span { color: var(--faint); font: 10.5px var(--font-mono); }
@@ -294,6 +314,7 @@ body.resizing-panels { cursor: col-resize; user-select: none; }
 .message-part textarea { width: 100%; padding: 8px 10px; border: 1px solid transparent; border-radius: 6px; background: var(--surface-2); color: var(--fg); font: 12px/1.65 var(--font-mono); }
 .message-part textarea[readonly] { background: var(--surface-2); color: color-mix(in oklab, var(--fg) 86%, transparent); }
 .message-readonly-reason { margin: 7px 0 0; color: var(--faint); font: 10px/1.5 var(--font-mono); }
+.read-only-message pre { margin: 0; color: var(--fg); font: 12px/1.65 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .message-actions { margin-top: 6px; }
 .edit-actions { margin: 0 -14px; padding: 8px 14px; border-top: 1px solid var(--border); border-bottom: 0; background: var(--surface); }
 .edit-preview, .edit-result { margin-top: 12px; border: 1px solid var(--border); border-radius: 7px; padding: 12px; }

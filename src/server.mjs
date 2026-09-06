@@ -107,6 +107,10 @@ import {
   undoCodexSessionImport,
 } from './codex-session-transfer.mjs';
 import { acquireInstanceLocks } from './instance-lock.mjs';
+import {
+  assertCodexTurnIsOwned,
+  inspectCodexSubagentInheritance,
+} from './codex-subagents.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -306,6 +310,18 @@ async function resolveMutationTarget(codexHome, body, sessions = null) {
     });
   }
   return { rolloutPath, sessionId };
+}
+
+async function inspectRegisteredSubagentTurn(codexHome, sessionId, sessions, childRecords = null) {
+  if (!sessionId || !Array.isArray(sessions)) return null;
+  const session = await getSession(codexHome, sessionId, sessions);
+  return inspectCodexSubagentInheritance(session, sessions, childRecords ? { childRecords } : {});
+}
+
+async function assertRegisteredTurnIsOwned(codexHome, sessionId, selector, sessions) {
+  const inheritance = await inspectRegisteredSubagentTurn(codexHome, sessionId, sessions);
+  if (inheritance) assertCodexTurnIsOwned(inheritance, selector);
+  return inheritance;
 }
 
 function compatibleBackupRoot(home, currentName, legacyName) {
@@ -1438,7 +1454,8 @@ export function createCleanerServer(options = {}) {
 
       const turnsMatch = requestUrl.pathname.match(/^\/api\/sessions\/([^/]+)\/turns$/);
       if (turnsMatch && request.method === 'GET') {
-        const session = await getSession(codexHome, decodeURIComponent(turnsMatch[1]), await loadSessions());
+        const sessions = await loadSessions();
+        const session = await getSession(codexHome, decodeURIComponent(turnsMatch[1]), sessions);
         if (!session.rolloutPath) {
           throw new CleanerError('ROLLOUT_NOT_FOUND', 'No rollout JSONL was found for this session.', 404);
         }
@@ -1478,10 +1495,31 @@ export function createCleanerServer(options = {}) {
             },
           };
         }
+        const inheritance = await inspectCodexSubagentInheritance(session, sessions, { childRecords: records });
         const merged = mergeThreadHistoryTurnRows(listTurnsFromRecords(records), history.rows);
+        const inheritedTurnIds = new Set(inheritance.inheritedTurns.map((turn) => turn.turnId));
+        const ownTurns = merged.turns
+          .filter((turn) => !inheritedTurnIds.has(turn.turnId))
+          .map((turn, index) => ({ ...turn, rolloutIndex: turn.index, index }));
         sendJson(response, 200, {
           session,
-          turns: merged.turns,
+          turns: ownTurns,
+          inheritedTurns: inheritance.inheritedTurns,
+          subagentContext: inheritance.info ? {
+            parentSessionId: inheritance.info.parentId,
+            parentTitle: inheritance.parent?.title || null,
+            agentPath: inheritance.info.agentPath,
+            agentNickname: inheritance.info.nickname,
+            agentRole: inheritance.info.role,
+            originatingTurnId: inheritance.originatingTurn?.turnId || null,
+            originatingPrompt: inheritance.originatingTurn?.prompt || null,
+            inheritedTurnCount: inheritance.inheritedTurns.length,
+            inheritedRecordRange: inheritance.inheritedRanges.length ? {
+              startLine: inheritance.inheritedRanges[0].startLine,
+              endLine: inheritance.inheritedRanges.at(-1).endLine,
+            } : null,
+            unavailableReason: inheritance.unavailableReason || null,
+          } : null,
           historyErrors: merged.unmatchedErrors,
           threadHistory: {
             available: history.available,
@@ -1552,6 +1590,9 @@ export function createCleanerServer(options = {}) {
         const body = await readJsonRequest(request);
         const sessions = body.rolloutPath ? null : await loadSessions();
         const rolloutPath = await resolveRolloutFromBody(codexHome, body, sessions);
+        const inheritance = sessions && body.sessionId
+          ? await inspectRegisteredSubagentTurn(codexHome, body.sessionId, sessions)
+          : null;
         sendJson(response, 200, {
           detail: await readFullContextView({
             rolloutPath,
@@ -1563,6 +1604,11 @@ export function createCleanerServer(options = {}) {
             role: body.role,
             category: body.category,
             scope: body.scope,
+            inheritedRanges: inheritance?.inheritedRanges || [],
+            inheritedParent: inheritance?.info ? {
+              id: inheritance.info.parentId,
+              title: inheritance.parent?.title || null,
+            } : null,
           }),
         });
         return;
@@ -1573,11 +1619,13 @@ export function createCleanerServer(options = {}) {
         if (!body.sessionId) {
           throw new CleanerError('MISSING_SESSION', 'Select a registered session before exporting context.', 400);
         }
+        const sessions = await loadSessions();
         const rolloutPath = await resolveRolloutFromBody(
           codexHome,
           { sessionId: body.sessionId },
-          await loadSessions(),
+          sessions,
         );
+        const inheritance = await inspectRegisteredSubagentTurn(codexHome, body.sessionId, sessions);
         sendDownload(response, await readFullContextExport({
           rolloutPath,
           sessionId: body.sessionId,
@@ -1587,6 +1635,11 @@ export function createCleanerServer(options = {}) {
           role: body.role,
           category: body.category,
           scope: body.scope,
+          inheritedRanges: inheritance?.inheritedRanges || [],
+          inheritedParent: inheritance?.info ? {
+            id: inheritance.info.parentId,
+            title: inheritance.parent?.title || null,
+          } : null,
         }));
         return;
       }
@@ -1595,9 +1648,11 @@ export function createCleanerServer(options = {}) {
         const body = await readJsonRequest(request);
         const sessions = body.rolloutPath ? null : await loadSessions();
         const { rolloutPath, sessionId } = await resolveMutationTarget(codexHome, body, sessions);
+        const selector = requireSelector(body);
+        await assertRegisteredTurnIsOwned(codexHome, sessionId, selector, sessions);
         const result = await previewMessageEdits({
           rolloutPath,
-          selector: requireSelector(body),
+          selector,
           edits: body.edits,
           sourceHash: body.sourceHash,
         });
@@ -1618,6 +1673,7 @@ export function createCleanerServer(options = {}) {
         const sessions = await loadSessions();
         const { rolloutPath } = await resolveMutationTarget(codexHome, { sessionId }, sessions);
         const selector = body.selector ? requireSelector(body) : { turnId };
+        await assertRegisteredTurnIsOwned(codexHome, sessionId, selector, sessions);
         if (codexToolDeleteMatch[4] === 'preview') {
           sendJson(response, 200, {
             ...await previewToolInteractionDeletion({ rolloutPath, selector, callId, backupRoot }),
@@ -1663,16 +1719,18 @@ export function createCleanerServer(options = {}) {
         }
         const sessions = body.rolloutPath ? null : await loadSessions();
         const { rolloutPath, sessionId } = await resolveMutationTarget(codexHome, body, sessions);
+        const selector = requireSelector(body);
+        await assertRegisteredTurnIsOwned(codexHome, sessionId, selector, sessions);
         const result = await executeRecordedOperation({
           kind: 'message_edit',
           label: '编辑会话消息',
           sessionIds: [sessionId],
-          details: { selector: requireSelector(body), changedMessages: body.edits?.length || 0 },
+          details: { selector, changedMessages: body.edits?.length || 0 },
         }, () => applyMessageEdits({
           codexHome,
           sessionId,
           rolloutPath,
-          selector: requireSelector(body),
+          selector,
           edits: body.edits,
           sourceHash: body.sourceHash,
           backupRoot,
@@ -1730,11 +1788,13 @@ export function createCleanerServer(options = {}) {
         const sessions = body.rolloutPath ? null : await loadSessions();
         const { rolloutPath, sessionId } = await resolveMutationTarget(codexHome, body, sessions);
         const mode = requireCleanupMode(body);
+        const selector = requireSelector(body);
+        await assertRegisteredTurnIsOwned(codexHome, sessionId, selector, sessions);
         sendJson(response, 200, {
           backupRoot,
           ...await previewCleanup({
             rolloutPath,
-            selector: requireSelector(body),
+            selector,
             mode,
           }),
           targetSessionLock: await inspectTargetSessionLocks(codexHome, [sessionId]),
@@ -1750,16 +1810,18 @@ export function createCleanerServer(options = {}) {
         const sessions = body.rolloutPath ? null : await loadSessions();
         const { rolloutPath, sessionId } = await resolveMutationTarget(codexHome, body, sessions);
         const mode = requireCleanupMode(body);
+        const selector = requireSelector(body);
+        await assertRegisteredTurnIsOwned(codexHome, sessionId, selector, sessions);
         const result = await executeRecordedOperation({
           kind: mode === CLEANUP_MODES.SINGLE ? 'turn_delete_single' : 'turn_delete_truncate',
           label: mode === CLEANUP_MODES.SINGLE ? '删除选中轮次' : '从选中轮次开始清理',
           sessionIds: [sessionId],
-          details: { selector: requireSelector(body), mode },
+          details: { selector, mode },
         }, () => applyCleanup({
           codexHome,
           sessionId,
           rolloutPath,
-          selector: requireSelector(body),
+          selector,
           mode,
           sourceHash: body.sourceHash,
           backupRoot,

@@ -20,6 +20,8 @@
 
 Codex 轮次的 `status` 可为 `completed`、`failed` 或 `aborted`。`failed` 轮次保留 `task_complete.error.message` 和 `codex_error_info`；精简轮次详情会把错误作为只读 `error` 消息返回，不会将其当作可编辑的助手消息。
 
+Codex 子代理的轮次响应会把与父会话共享的连续 `turn_id` 从 `turns` 移入 `inheritedTurns`，并通过 `subagentContext` 返回父会话、启动子代理的父轮次问题及继承范围。`agent_message` 任务记录会在精简模式中只读展示；若任务正文由 Codex 保存为 `encrypted_content`，接口会明确标记而不会伪造明文。完整上下文中的继承记录带有 `inherited: true`，不返回编辑目标；编辑、工具删除和轮次清理接口会拒绝修改继承轮次。
+
 ## Claude Code 资源
 
 | 方法 | 路径 | 用途 |

@@ -305,6 +305,22 @@ test('Codex compact and stored views expose editable tool calls and results in c
   assert.equal(context.records.find((record) => record.type === 'reasoning').editableParts[0].text, 'stored summary');
 });
 
+test('Codex compact views expose encrypted subagent task events as read-only messages', () => {
+  const records = parseJsonl(jsonl([
+    { type: 'event_msg', payload: { type: 'task_started', turn_id: 'subagent-turn' } },
+    { type: 'response_item', payload: { type: 'agent_message', author: '/root', recipient: '/root/audit', content: [{ type: 'input_text', text: 'Message Type: NEW_TASK\nTask name: /root/audit\nSender: /root\nPayload:\n' }, { type: 'encrypted_content', encrypted_content: 'ciphertext' }] } },
+    { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'audit result' }] } },
+    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'subagent-turn' } },
+  ]));
+  const detail = buildTurnMessageDetail(records, { turnId: 'subagent-turn' });
+  assert.deepEqual(detail.messages.map((message) => message.role), ['subagent_task', 'assistant']);
+  assert.equal(detail.messages[0].editable, false);
+  assert.match(detail.messages[0].text, /任务正文由 Codex 以加密内容保存/);
+
+  const compact = buildCompactConversationPreview(records);
+  assert.deepEqual(compact.messages.map((message) => message.role), ['subagent_task', 'assistant']);
+});
+
 test('Codex tool fields can be edited, invalid JSON is rejected, and an interaction can be deleted and restored', async () => {
   const temp = await mkdtemp(path.join(os.tmpdir(), 'codex-tool-edit-'));
   const rolloutPath = path.join(temp, 'rollout-tool-session.jsonl');

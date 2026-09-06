@@ -100,13 +100,28 @@ function sensitiveKindsForRecord(record) {
     .map(({ kind }) => kind);
 }
 
-function enrichRecord(record) {
+function inheritedRangeForRecord(record, ranges) {
+  return ranges.find((range) => (
+    Number.isInteger(range?.startLine)
+    && Number.isInteger(range?.endLine)
+    && record.lineNumber >= range.startLine
+    && record.lineNumber <= range.endLine
+  )) || null;
+}
+
+function enrichRecord(record, inheritedRanges = [], inheritedParent = null) {
   const sensitiveKinds = sensitiveKindsForRecord(record);
+  const inheritedRange = inheritedRangeForRecord(record, inheritedRanges);
   return {
     ...record,
+    label: inheritedRange ? `继承 · ${record.label}` : record.label,
+    editableParts: inheritedRange ? [] : record.editableParts,
     category: classifyContextRecord(record),
     hasSensitiveContent: sensitiveKinds.length > 0,
     sensitiveKinds,
+    inherited: Boolean(inheritedRange),
+    inheritedFromTurnId: inheritedRange?.turnId || null,
+    inheritedParent,
   };
 }
 
@@ -136,7 +151,8 @@ function recordMatches(record, options) {
 function buildFilteredContext(records, selector, rawOptions = {}) {
   const options = normalizeOptions(rawOptions);
   const context = collectContextRecords(records, selector);
-  const enriched = context.records.map(enrichRecord);
+  const inheritedRanges = Array.isArray(rawOptions.inheritedRanges) ? rawOptions.inheritedRanges : [];
+  const enriched = context.records.map((record) => enrichRecord(record, inheritedRanges, rawOptions.inheritedParent || null));
   const filtered = enriched.filter((record) => recordMatches(record, options));
   return { options, context, enriched, filtered };
 }
@@ -184,6 +200,7 @@ export function buildFullContextView(records, selector, rawOptions = {}) {
     futureRecordCount: context.futureRecordCount,
     sensitiveContextRecordCount: enriched.filter((record) => record.hasSensitiveContent).length,
     sensitiveFilteredRecordCount: filtered.filter((record) => record.hasSensitiveContent).length,
+    inheritedContextRecordCount: enriched.filter((record) => record.inherited).length,
   };
 }
 

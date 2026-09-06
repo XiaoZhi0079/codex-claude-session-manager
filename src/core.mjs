@@ -145,7 +145,7 @@ function isInjectedUserContext(text) {
   ].some((prefix) => normalized.startsWith(prefix));
 }
 
-function getUserSummary(records) {
+export function getVisibleUserText(records) {
   for (const record of records) {
     const data = record.data;
     const item = data?.item || data?.payload?.item || data?.payload || data?.message || data;
@@ -157,10 +157,15 @@ function getUserSummary(records) {
       .replace(/\s+/g, ' ')
       .trim();
     if (text && !isInjectedUserContext(text)) {
-      return text.length > 160 ? `${text.slice(0, 157)}...` : text;
+      return text;
     }
   }
   return '';
+}
+
+function getUserSummary(records) {
+  const text = getVisibleUserText(records);
+  return text.length > 160 ? `${text.slice(0, 157)}...` : text;
 }
 
 function runtimeEventMessage(record, recordIndex = null) {
@@ -362,6 +367,31 @@ function getMessageLocation(data) {
   )) || null;
 }
 
+function getAgentMessageView(data) {
+  const candidates = [data?.payload, data?.item, data?.payload?.item];
+  const container = candidates.find((candidate) => (
+    candidate?.type === 'agent_message' && Array.isArray(candidate.content)
+  ));
+  if (!container) return null;
+  const visibleText = container.content
+    .filter((part) => ['input_text', 'output_text', 'text'].includes(part?.type) && typeof part.text === 'string')
+    .map((part) => part.text)
+    .join('\n\n')
+    .trim();
+  const encrypted = container.content.some((part) => part?.type === 'encrypted_content');
+  if (!visibleText && !encrypted) return null;
+  const encryptionNotice = encrypted
+    ? '任务正文由 Codex 以加密内容保存，当前 rollout 中没有可直接读取的明文。'
+    : null;
+  return {
+    container,
+    text: [visibleText, encryptionNotice ? `[${encryptionNotice}]` : ''].filter(Boolean).join('\n\n'),
+    encrypted,
+    encryptionNotice,
+    isNewTask: /(^|\n)Message Type:\s*NEW_TASK(?:\n|$)/i.test(visibleText),
+  };
+}
+
 function getToolLocation(data) {
   const candidates = [
     { container: data?.payload, path: ['payload'] },
@@ -487,7 +517,8 @@ function contextRecordText(data, location) {
       || '';
   }
   if (type === 'agent_message' || type === 'user_message') {
-    return typeof data?.payload?.message === 'string' ? data.payload.message : '';
+    if (typeof data?.payload?.message === 'string') return data.payload.message;
+    return getAgentMessageView(data)?.text || '';
   }
   if (type === 'function_call' || type === 'custom_tool_call' || type === 'tool_search_call') {
     const input = data?.payload?.arguments
@@ -676,6 +707,24 @@ function collectTurnMessages(records, selector) {
       });
       continue;
     }
+    const agentMessage = getAgentMessageView(record.data);
+    if (agentMessage) {
+      messages.push({
+        messageId: String(recordIndex),
+        recordIndex,
+        lineNumber: record.lineNumber,
+        role: agentMessage.isNewTask ? 'subagent_task' : 'agent_message',
+        phase: agentMessage.isNewTask ? 'new_task' : 'agent_message',
+        author: agentMessage.container.author || null,
+        recipient: agentMessage.container.recipient || null,
+        text: agentMessage.text,
+        encryptedContent: agentMessage.encrypted,
+        readOnlyReason: agentMessage.encryptionNotice,
+        parts: [{ targetId: null, type: 'agent_message', text: agentMessage.text }],
+        editable: false,
+      });
+      continue;
+    }
     const location = getMessageLocation(record.data);
     if (!location) continue;
 
@@ -758,6 +807,21 @@ export function buildCompactConversationPreview(records, rawOptions = {}) {
         text: truncated
           ? `${runtimeMessage.text.slice(0, maxMessageChars)}\n\n[内容过长，已截断]`
           : runtimeMessage.text,
+        truncated,
+      });
+      continue;
+    }
+    const agentMessage = getAgentMessageView(record.data);
+    if (agentMessage) {
+      const truncated = agentMessage.text.length > maxMessageChars;
+      if (truncated) truncatedMessageCount += 1;
+      messages.push({
+        role: agentMessage.isNewTask ? 'subagent_task' : 'agent_message',
+        phase: agentMessage.isNewTask ? 'new_task' : 'agent_message',
+        lineNumber: record.lineNumber,
+        turnIndex: turn.index,
+        text: truncated ? `${agentMessage.text.slice(0, maxMessageChars)}\n\n[内容过长，已截断]` : agentMessage.text,
+        encryptedContent: agentMessage.encrypted,
         truncated,
       });
       continue;

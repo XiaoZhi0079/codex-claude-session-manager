@@ -3,6 +3,8 @@ const state = {
   sessions: [],
   directories: [],
   turns: [],
+  inheritedTurns: [],
+  subagentContext: null,
   historyErrors: [],
   threadHistoryWarning: null,
   selectedDirectory: '*',
@@ -33,6 +35,7 @@ const state = {
   sessionDeletePlan: null,
   selectedSessionIds: new Set(),
   visibleSessionIds: [],
+  expandedCodexParents: new Set(),
   deletionBackups: [],
   selectedBackupIds: new Set(),
   operationBackups: [],
@@ -715,6 +718,8 @@ function resetMessageEditor({ keepLastEdit = false } = {}) {
 
 function resetTurnWorkspace({ keepLastEdit = false } = {}) {
   state.selectedTurn = null;
+  state.inheritedTurns = [];
+  state.subagentContext = null;
   resetCleanupPreview();
   resetMessageEditor({ keepLastEdit });
   setOperationView('messages');
@@ -818,6 +823,99 @@ function claudeTitleSourceLabel(source) {
   return labels[source] || source || '未知标题来源';
 }
 
+function codexSubagentInfo(session) {
+  const candidates = [session?.source, session?.sqliteSource];
+  for (const candidate of candidates) {
+    let source = candidate;
+    if (typeof source === 'string' && source.trim().startsWith('{')) {
+      try { source = JSON.parse(source); } catch { source = null; }
+    }
+    const spawn = source?.subagent?.thread_spawn;
+    if (!spawn?.parent_thread_id) continue;
+    return {
+      parentId: spawn.parent_thread_id,
+      depth: Number.isInteger(spawn.depth) ? spawn.depth : 1,
+      nickname: spawn.agent_nickname || null,
+      role: spawn.agent_role || null,
+      agentPath: spawn.agent_path || null,
+    };
+  }
+  return null;
+}
+
+function codexSubagentTask(info) {
+  if (!info?.agentPath) return '';
+  return String(info.agentPath).replace(/^\/+root\//, '').replace(/^\/+/, '');
+}
+
+function codexSessionDisplayTitle(session) {
+  const info = codexSubagentInfo(session);
+  if (!info) return session?.title || '(untitled)';
+  return [info.nickname, codexSubagentTask(info), info.role].filter(Boolean).join(' · ') || '未命名子代理';
+}
+
+function codexSessionMatchesFilter(session, filter, sessionsById) {
+  if (!filter) return true;
+  const info = codexSubagentInfo(session);
+  const parent = info ? sessionsById.get(info.parentId) : null;
+  return [
+    session.title,
+    codexSessionDisplayTitle(session),
+    session.id,
+    session.projectPath,
+    session.threadSource,
+    session.storageStatus,
+    storageStatusLabel(session),
+    info?.parentId,
+    info?.agentPath,
+    info?.nickname,
+    info?.role,
+    parent?.title,
+  ].filter(Boolean).join(' ').toLowerCase().includes(filter);
+}
+
+function buildCodexSessionRows(directorySessions, filter) {
+  const sessionsById = new Map(directorySessions.map((session) => [session.id, session]));
+  const childrenByParent = new Map();
+  const roots = [];
+  for (const session of directorySessions) {
+    const info = codexSubagentInfo(session);
+    if (info?.parentId && sessionsById.has(info.parentId)) {
+      const children = childrenByParent.get(info.parentId) || [];
+      children.push(session);
+      childrenByParent.set(info.parentId, children);
+    } else {
+      roots.push(session);
+    }
+  }
+
+  const branchMatchCache = new Map();
+  const branchMatches = (session, path = new Set()) => {
+    if (branchMatchCache.has(session.id)) return branchMatchCache.get(session.id);
+    if (path.has(session.id)) return false;
+    const nextPath = new Set(path).add(session.id);
+    const result = codexSessionMatchesFilter(session, filter, sessionsById)
+      || (childrenByParent.get(session.id) || []).some((child) => branchMatches(child, nextPath));
+    branchMatchCache.set(session.id, result);
+    return result;
+  };
+
+  const rows = [];
+  const visited = new Set();
+  const append = (session, depth, parent = null) => {
+    if (visited.has(session.id) || (filter && !branchMatches(session))) return;
+    visited.add(session.id);
+    const children = childrenByParent.get(session.id) || [];
+    const expanded = Boolean(filter) || state.expandedCodexParents.has(session.id);
+    rows.push({ session, depth, parent, childCount: children.length, expanded });
+    if (expanded) {
+      for (const child of children) append(child, depth + 1, session);
+    }
+  };
+  for (const root of roots) append(root, 0);
+  return { rows, sessionsById };
+}
+
 function renderClaudeSessions() {
   const filter = $('sessionFilter').value.trim().toLowerCase();
   const directorySessions = state.sessions.filter(sessionMatchesDirectory);
@@ -879,27 +977,30 @@ function renderSessions() {
   }
 
   const directorySessions = state.sessions.filter(sessionMatchesDirectory);
-  const sessions = directorySessions.filter((session) => {
-    const haystack = `${session.title || ''} ${session.id || ''} ${session.projectPath || ''} ${session.source || ''} ${session.threadSource || ''} ${session.storageStatus || ''} ${storageStatusLabel(session)}`.toLowerCase();
-    return haystack.includes(filter);
-  });
-  state.visibleSessionIds = sessions.filter(isSessionDeletable).map((session) => session.id);
+  const { rows, sessionsById } = buildCodexSessionRows(directorySessions, filter);
+  const matchingCount = directorySessions.filter((session) => (
+    codexSessionMatchesFilter(session, filter, sessionsById)
+  )).length;
+  state.visibleSessionIds = rows.map(({ session }) => session).filter(isSessionDeletable).map((session) => session.id);
   updateBatchControls();
 
+  const subagentCount = directorySessions.filter((session) => codexSubagentInfo(session)).length;
   $('sessionCount').textContent = filter
-    ? `${sessions.length} / ${directorySessions.length}`
-    : `${sessions.length} 个会话`;
-  if (!sessions.length) {
+    ? `${matchingCount} 个匹配 · ${directorySessions.length} 个会话`
+    : `${directorySessions.length - subagentCount} 个主会话 · ${subagentCount} 个子代理`;
+  if (!rows.length) {
     $('sessions').innerHTML = '<div class="list-status">当前目录没有匹配的会话。</div>';
     return;
   }
 
-  $('sessions').innerHTML = sessions.map((session) => {
+  $('sessions').innerHTML = rows.map(({ session, depth, parent, childCount, expanded }) => {
+    const subagent = codexSubagentInfo(session);
+    const displayTitle = codexSessionDisplayTitle(session);
     const selected = state.selectedSession?.id === session.id ? ' selected' : '';
     const checked = state.selectedSessionIds.has(session.id) ? ' checked' : '';
     const deletable = isSessionDeletable(session);
     const checkboxHint = deletable
-      ? `选择会话 ${session.title || session.id}`
+      ? `选择会话 ${displayTitle || session.id}`
       : '该条目只存在于不受本工具管理的外部备份';
     const health = session.health || {
       state: session.codexVisible ? 'healthy' : 'attention',
@@ -907,11 +1008,12 @@ function renderSessions() {
       summary: '打开诊断查看各数据来源。',
     };
     return `
-      <div class="session-entry">
+      <div class="session-entry codex-session-entry${subagent ? ' is-subagent' : ''}" style="--session-indent: ${Math.min(depth, 6) * 7}px">
         <input type="checkbox" aria-label="${escapeHtml(checkboxHint)}" title="${escapeHtml(checkboxHint)}" data-session-select="${escapeHtml(session.id)}"${checked}${deletable ? '' : ' disabled'}>
+        ${childCount ? `<button class="session-tree-toggle" type="button" data-subagent-toggle="${escapeHtml(session.id)}" aria-expanded="${expanded}" title="${expanded ? '折叠' : '展开'} ${childCount} 个子代理"><span aria-hidden="true">${expanded ? '⌄' : '›'}</span><small>${childCount}</small></button>` : '<span class="session-tree-spacer" aria-hidden="true"></span>'}
         <button class="session-row${selected}" type="button" data-session-id="${escapeHtml(session.id)}">
-          <span class="session-title" title="${escapeHtml(session.title || '(untitled)')}">${escapeHtml(session.title || '(untitled)')}</span>
-          <span class="session-project">${escapeHtml(displayPath(session.projectPath) || '未知项目目录')}</span>
+          <span class="session-title" title="${escapeHtml(subagent ? `${displayTitle}｜原始任务：${session.title || '(untitled)'}` : displayTitle)}">${subagent ? '<span class="session-kind-badge">子代理</span>' : ''}<span class="session-title-label">${escapeHtml(displayTitle)}</span></span>
+          <span class="session-project">${escapeHtml(subagent ? `父会话：${parent?.title || subagent.parentId} · ${displayPath(session.projectPath) || '未知项目目录'}` : (displayPath(session.projectPath) || '未知项目目录'))}</span>
           <span class="session-meta">${escapeHtml([
             formatDate(session.updatedAt),
             storageStatusLabel(session),
@@ -923,7 +1025,7 @@ function renderSessions() {
               : '',
             session.codexVisible ? 'Codex 可见' : (session.hasRollout ? 'Codex 隐藏' : '无正文'),
             session.recoverableFromBackup ? '可从备份恢复' : '',
-            session.threadSource === 'subagent' ? '子代理' : '',
+            subagent?.depth ? `深度 ${subagent.depth}` : '',
             session.indexed ? '' : '由 rollout 恢复',
             `健康 ${health.label}`,
           ].filter(Boolean).join(' · '))}</span>
@@ -1141,8 +1243,9 @@ async function runHealthAction(actionId) {
 function renderTurns(turns) {
   const historyErrors = state.historyErrors || [];
   const historyWarning = state.threadHistoryWarning;
-  $('turnCount').textContent = `${turns.length} 轮${historyErrors.length ? ` · ${historyErrors.length} 条分页失败` : ''}${historyWarning ? ' · 分页信息不可用' : ''}`;
-  if (!turns.length && !historyErrors.length && !historyWarning) {
+  const inheritedCount = state.subagentContext?.inheritedTurnCount || 0;
+  $('turnCount').textContent = `${turns.length} 轮${inheritedCount ? ` · 继承 ${inheritedCount} 轮` : ''}${historyErrors.length ? ` · ${historyErrors.length} 条分页失败` : ''}${historyWarning ? ' · 分页信息不可用' : ''}`;
+  if (!turns.length && !inheritedCount && !historyErrors.length && !historyWarning) {
     $('turns').className = 'turns-empty';
     $('turns').textContent = '没有识别到轮次边界。';
     return;
@@ -1188,7 +1291,13 @@ function renderTurns(turns) {
       <span>正式 rollout 对话仍已正常显示；错误编号 <code>${escapeHtml(historyWarning.errorId || historyWarning.code || 'THREAD_HISTORY_READ_FAILED')}</code>。</span>
     </div>
   ` : '';
-  $('turns').innerHTML = historyWarningBanner + undoBanner + `
+  const inheritedBanner = inheritedCount ? `
+    <div class="subagent-inherited-banner" role="status">
+      <strong>已折叠 ${inheritedCount} 轮父会话上下文</strong>
+      <span>来自“${escapeHtml(state.subagentContext.parentTitle || state.subagentContext.parentSessionId || '父会话')}”；这些记录实际存在于子代理 rollout 中，可在独立轮的完整模式查看，但不能从子代理中编辑或删除。</span>
+    </div>
+  ` : '';
+  $('turns').innerHTML = historyWarningBanner + inheritedBanner + undoBanner + `
     <div class="turn-header">
       <span>#</span><span>时间</span><span>行号</span><span>摘要</span>
     </div>
@@ -1255,6 +1364,8 @@ function renderCleanupPreview(body) {
 
 function messageRoleLabel(message) {
   if (message.role === 'user') return '你';
+  if (message.role === 'subagent_task') return message.phase === 'parent_prompt' ? '父会话发起问题' : '子代理任务';
+  if (message.role === 'agent_message') return '代理间消息';
   if (message.role === 'tool_call') return `${isClaudePlatform() ? 'Claude' : 'Codex'} · 工具调用${message.name ? ` · ${message.name}` : ''}`;
   if (message.role === 'tool_result') return `工具结果${message.name ? ` · ${message.name}` : ''}`;
   if (message.role === 'error') return message.phase === 'turn_aborted' ? 'Codex · 任务中止' : 'Codex · 错误';
@@ -1286,7 +1397,23 @@ function resizeMessageEditor(textarea) {
 }
 
 function renderMessages() {
-  const messages = state.turnDetail?.messages || [];
+  const messages = [...(state.turnDetail?.messages || [])];
+  if (!isClaudePlatform()
+    && state.selectedTurn?.index === 0
+    && state.subagentContext?.originatingPrompt) {
+    const taskName = String(state.subagentContext.agentPath || '').replace(/^\/root\//, '');
+    messages.unshift({
+      role: 'subagent_task',
+      phase: 'parent_prompt',
+      lineNumber: null,
+      editable: false,
+      readOnlyReason: '这是启动该子代理的父会话问题，仅用于说明任务来源；请在父会话中修改。',
+      parts: [{
+        targetId: null,
+        text: `${taskName ? `任务：${taskName}\n\n` : ''}父会话发起问题：\n${state.subagentContext.originatingPrompt}`,
+      }],
+    });
+  }
   if (!messages.length) {
     $('messageList').innerHTML = `<div class="list-status">本轮没有可见的用户、${isClaudePlatform() ? 'Claude 或工具' : 'Codex'}消息。</div>`;
     $('editActions').classList.add('hidden');
@@ -1297,12 +1424,12 @@ function renderMessages() {
     <article class="message-block role-${message.role}">
       <header class="message-head">
         <strong>${escapeHtml(messageRoleLabel(message))}</strong>
-        <span>第 ${message.lineNumber} 行${message.externalOutput ? ` · 外置完整输出 ${escapeHtml(formatBytes(message.externalOutput.sizeBytes))}` : ''}</span>
+        <span>${message.lineNumber ? `第 ${message.lineNumber} 行` : '任务来源'}${message.externalOutput ? ` · 外置完整输出 ${escapeHtml(formatBytes(message.externalOutput.sizeBytes))}` : ''}</span>
       </header>
       ${message.parts.map((part, partIndex) => message.editable === false ? `
-        <div class="message-part runtime-error-message">
+        <div class="message-part ${message.role === 'error' ? 'runtime-error-message' : 'read-only-message'}">
           <pre>${escapeHtml(part.text)}</pre>
-          ${message.readOnlyReason ? `<p class="message-readonly-reason">${escapeHtml(message.readOnlyReason)}</p>` : ''}
+          ${message.readOnlyReason && !String(part.text || '').includes(message.readOnlyReason) ? `<p class="message-readonly-reason">${escapeHtml(message.readOnlyReason)}</p>` : ''}
           ${partIndex === 0 && message.role === 'tool_call' && message.toolUseId ? `<div class="message-actions"><button type="button" class="danger-outline" data-delete-tool="${escapeHtml(message.toolUseId)}">删除工具调用</button></div>` : ''}
         </div>
       ` : `
@@ -1322,7 +1449,8 @@ function renderMessages() {
   updateEditControls();
 }
 
-function contextScopeLabel(scope) {
+function contextScopeLabel(scope, record = null) {
+  if (record?.inherited) return '父会话继承';
   return scope === 'current_turn' ? '当前轮' : '此前上下文';
 }
 
@@ -1416,7 +1544,7 @@ function renderFullContext() {
 
   const pageStart = detail.records.length ? detail.page.offset + 1 : 0;
   const pageEnd = detail.page.offset + detail.records.length;
-  $('contextModeSummary').textContent = `筛选 ${detail.filteredRecordCount} / 上下文 ${detail.contextRecordCount} 条 · 当前页 ${pageStart}-${pageEnd}${detail.futureRecordCount ? ` · 当前轮后 ${detail.futureRecordCount} 条未纳入` : ''}`;
+  $('contextModeSummary').textContent = `筛选 ${detail.filteredRecordCount} / 上下文 ${detail.contextRecordCount} 条 · 当前页 ${pageStart}-${pageEnd}${detail.inheritedContextRecordCount ? ` · 父会话继承 ${detail.inheritedContextRecordCount} 条` : ''}${detail.futureRecordCount ? ` · 当前轮后 ${detail.futureRecordCount} 条未纳入` : ''}`;
   $('fullContextFirstButton').disabled = detail.page.offset === 0;
   $('fullContextPreviousButton').disabled = detail.page.previousOffset === null;
   $('fullContextNextButton').disabled = detail.page.nextOffset === null;
@@ -1475,7 +1603,7 @@ function renderFullContext() {
         ? `<details class="large-context-text"><summary>展开大型工具结果 · ${formatBytes(record.text.length)}</summary><pre>${textContent}</pre></details>`
         : `<pre class="full-context-text">${textContent}</pre>`));
     return `
-      <article data-context-line="${record.lineNumber}" class="full-context-record scope-${record.scope}${record.type === 'session_meta' ? ' base-instructions' : ''}${record.hasSensitiveContent ? ' sensitive-record' : ''}${detail.page.lineFound === record.lineNumber ? ' jump-target' : ''}">
+      <article data-context-line="${record.lineNumber}" class="full-context-record scope-${record.scope}${record.inherited ? ' inherited-record' : ''}${record.type === 'session_meta' ? ' base-instructions' : ''}${record.hasSensitiveContent ? ' sensitive-record' : ''}${detail.page.lineFound === record.lineNumber ? ' jump-target' : ''}">
         <header class="full-context-record-head">
           <div>
             <strong>${escapeHtml(record.label)}</strong>
@@ -1485,7 +1613,7 @@ function renderFullContext() {
             ${record.scope === 'current_turn' ? (record.toolCalls || []).map((tool) => `<button type="button" class="btn btn-sm danger-outline" data-delete-tool="${escapeHtml(tool.id)}">删除 ${escapeHtml(tool.name)}</button>`).join('') : ''}
             ${record.hasSensitiveContent ? `<span class="context-sensitive-badge" title="${escapeHtml(record.sensitiveKinds.join('、'))}">可能含敏感信息</span>` : ''}
             ${record.externalOutput ? `<span class="context-sensitive-badge">外置结果 ${escapeHtml(formatBytes(record.externalOutput.sizeBytes))}</span>` : ''}
-            <span class="context-scope">${contextScopeLabel(record.scope)}</span>
+            <span class="context-scope">${contextScopeLabel(record.scope, record)}</span>
           </span>
         </header>
         ${textMarkup}
@@ -1709,6 +1837,8 @@ async function loadTurns() {
   const prefix = isClaudePlatform() ? '/api/claude-code/sessions' : '/api/sessions';
   const body = await api(`${prefix}/${encodeURIComponent(state.selectedSession.id)}/turns`);
   state.turns = body.turns;
+  state.inheritedTurns = body.inheritedTurns || [];
+  state.subagentContext = body.subagentContext || null;
   state.historyErrors = body.historyErrors || [];
   state.threadHistoryWarning = body.threadHistory?.reason === 'read_failed'
     ? (body.threadHistory.error || { code: 'THREAD_HISTORY_READ_FAILED' })
@@ -1735,6 +1865,15 @@ async function selectSession(sessionId) {
     await loadTurns();
     return;
   }
+  let ancestor = state.selectedSession;
+  const seenAncestors = new Set();
+  while (ancestor) {
+    const info = codexSubagentInfo(ancestor);
+    if (!info?.parentId || seenAncestors.has(info.parentId)) break;
+    seenAncestors.add(info.parentId);
+    state.expandedCodexParents.add(info.parentId);
+    ancestor = state.sessions.find((session) => session.id === info.parentId);
+  }
   const deletable = isSessionDeletable(state.selectedSession);
   $('deleteSessionButton').disabled = !deletable;
   $('deleteSessionButton').title = deletable
@@ -1743,9 +1882,9 @@ async function selectSession(sessionId) {
       : '备份并删除选中的 Codex 会话')
     : '该条目只存在于不受本工具管理的外部备份';
   $('cleanupTabButton').disabled = true;
-  $('previewSession').textContent = state.selectedSession?.title || sessionId;
+  $('previewSession').textContent = codexSessionDisplayTitle(state.selectedSession) || sessionId;
   $('turnContext').textContent = state.selectedSession
-    ? `← ${state.selectedSession.title || '(untitled)'} · ${String(state.selectedSession.id || '').slice(0, 8)}`
+    ? `← ${codexSessionDisplayTitle(state.selectedSession)} · ${String(state.selectedSession.id || '').slice(0, 8)}`
     : '';
   $('turnContext').classList.toggle('hidden', !state.selectedSession);
   renderSessions();
@@ -3534,6 +3673,14 @@ $('directoryFilter').addEventListener('change', () => {
   renderSessions();
 });
 $('sessions').addEventListener('click', (event) => {
+  const treeToggle = event.target.closest('[data-subagent-toggle]');
+  if (treeToggle) {
+    const parentId = treeToggle.dataset.subagentToggle;
+    if (state.expandedCodexParents.has(parentId)) state.expandedCodexParents.delete(parentId);
+    else state.expandedCodexParents.add(parentId);
+    renderSessions();
+    return;
+  }
   const healthButton = event.target.closest('[data-session-health]');
   if (healthButton) {
     openSessionHealth(healthButton.dataset.sessionHealth).catch((error) => setAlert(error.message));

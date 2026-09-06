@@ -57,6 +57,8 @@ Claude JSONL 的 `message.role` 是传输信封角色，不等于内容来源：
 
 Claude Code 子代理位于主会话侧边目录，可通过 `metadata.toolUseId` 与一次工具调用精确关联；删除该工具交互时可以一并清理对应子代理 JSONL/meta。Codex 子代理是 SQLite `threads` 中具有 `source.subagent.thread_spawn.parent_thread_id` 的独立线程，目前没有稳定的工具 `call_id` 映射，因此父会话和工具交互删除默认保留这些子线程。
 
+Codex 创建子代理时会把父会话上下文复制进子线程 rollout，并保留原 `turn_id`。读取器将子线程开头与父 rollout 相同的连续 `turn_id` 标记为继承前缀：轮次列表默认隐藏这些轮次，只展示子代理独立产生的轮次；完整模式保留继承记录并标为只读。读取器还会通过父 rollout 中的 `SubAgentActivity.agent_thread_id` 定位启动子代理的父轮次，在子代理首轮只读展示完整父问题；子代理 `agent_message` 中的可见任务头会一并展示，`encrypted_content` 只说明加密状态，不尝试解密。父 rollout 缺失、不可解析或关联无法证明时不猜测继承范围或任务来源，以免隐藏、禁止操作或错误归属真实子代理内容。
+
 Claude 删除把主 JSONL、`projects/<项目>/<sessionId>`、`tasks/<sessionId>`、`file-history/<sessionId>`、`session-env/<sessionId>` 和索引条目视为一个聚合。删除前逐项计算指纹并复制到工具专属备份目录，验证副本后才删除；恢复只写回缺失或完全一致的目标，拒绝覆盖不同内容。
 
 ### 只读操作

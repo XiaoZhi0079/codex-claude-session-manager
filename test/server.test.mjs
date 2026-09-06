@@ -223,3 +223,89 @@ test('Codex tool interaction REST API deletes paired records and operation histo
     await rm(temp, { recursive: true, force: true });
   }
 });
+
+test('Codex subagent lists only owned turns and keeps inherited parent context read-only', async () => {
+  const parentId = '01a05dca-4389-72c0-b3ee-e21341451001';
+  const childId = '01a05dca-4389-72c0-b3ee-e21341451002';
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'codex-subagent-turns-'));
+  const codexHome = path.join(temp, '.codex');
+  const sessionsDir = path.join(codexHome, 'sessions', '2026', '09', '06');
+  const backupRoot = path.join(temp, 'backups');
+  const parentPrompt = `investigate session migration ${'with complete context '.repeat(10)}`.trim();
+  await mkdir(sessionsDir, { recursive: true });
+  const inheritedRecords = [
+    { type: 'event_msg', payload: { type: 'task_started', turn_id: 'parent-turn-1' } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'shared request' }] } },
+    { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'shared answer' }] } },
+    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'parent-turn-1' } },
+  ];
+  await writeFile(path.join(sessionsDir, `rollout-${parentId}.jsonl`), jsonl([
+    { type: 'session_meta', payload: { id: parentId, cwd: temp, thread_source: 'user' } },
+    ...inheritedRecords,
+    { type: 'event_msg', payload: { type: 'task_started', turn_id: 'parent-spawn-turn' } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: parentPrompt }] } },
+    { type: 'event_msg', payload: { type: 'item_completed', turn_id: 'parent-spawn-turn', item: { type: 'SubAgentActivity', kind: 'started', agent_thread_id: childId, agent_path: '/root/audit' } } },
+    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'parent-spawn-turn' } },
+  ]), 'utf8');
+  await writeFile(path.join(sessionsDir, `rollout-${childId}.jsonl`), jsonl([
+    {
+      type: 'session_meta',
+      payload: {
+        id: childId,
+        cwd: temp,
+        thread_source: 'subagent',
+        source: { subagent: { thread_spawn: { parent_thread_id: parentId, depth: 1, agent_path: '/root/audit', agent_nickname: 'Auditor' } } },
+      },
+    },
+    ...inheritedRecords,
+    { type: 'event_msg', payload: { type: 'task_started', turn_id: 'child-turn-1' } },
+    { type: 'response_item', payload: { type: 'agent_message', author: '/root', recipient: '/root/audit', content: [{ type: 'input_text', text: 'Message Type: NEW_TASK\nTask name: /root/audit\nSender: /root\nPayload:\n' }, { type: 'encrypted_content', encrypted_content: 'ciphertext' }] } },
+    { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'child-only analysis' }] } },
+    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'child-turn-1' } },
+  ]), 'utf8');
+
+  const server = createCleanerServer({ codexHome, backupRoot, env: {} });
+  try {
+    const baseUrl = await listen(server);
+    const turns = await request(baseUrl, `/api/sessions/${childId}/turns`);
+    assert.equal(turns.turns.length, 1);
+    assert.equal(turns.turns[0].turnId, 'child-turn-1');
+    assert.equal(turns.turns[0].index, 0);
+    assert.equal(turns.turns[0].rolloutIndex, 1);
+    assert.equal(turns.inheritedTurns.length, 1);
+    assert.equal(turns.subagentContext.parentSessionId, parentId);
+    assert.equal(turns.subagentContext.originatingPrompt, parentPrompt);
+
+    const detail = await request(baseUrl, '/api/turn-detail', {
+      sessionId: childId,
+      selector: { turnId: 'child-turn-1' },
+    });
+    assert.deepEqual(detail.detail.messages.map((message) => message.role), ['subagent_task', 'assistant']);
+    assert.match(detail.detail.messages[0].text, /NEW_TASK/);
+    assert.match(detail.detail.messages[0].text, /加密内容/);
+    assert.equal(detail.detail.messages[0].editable, false);
+
+    const context = await request(baseUrl, '/api/full-context', {
+      sessionId: childId,
+      selector: { turnId: 'child-turn-1' },
+      offset: 0,
+      limit: 20,
+    });
+    const inherited = context.detail.records.filter((record) => record.inherited);
+    assert.equal(inherited.length, inheritedRecords.length);
+    assert.equal(inherited.every((record) => record.editableParts.length === 0), true);
+    assert.equal(inherited.every((record) => record.label.startsWith('继承 · ')), true);
+
+    const response = await fetch(`${baseUrl}/api/preview`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: childId, selector: { turnId: 'parent-turn-1' }, mode: 'single' }),
+    });
+    const error = await response.json();
+    assert.equal(response.status, 409);
+    assert.equal(error.error.code, 'INHERITED_SUBAGENT_TURN_READ_ONLY');
+  } finally {
+    if (server.listening) await close(server);
+    await rm(temp, { recursive: true, force: true });
+  }
+});
