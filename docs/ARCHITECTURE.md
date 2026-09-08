@@ -61,6 +61,10 @@ Codex 创建子代理时会把父会话上下文复制进子线程 rollout，并
 
 Claude 删除把主 JSONL、`projects/<项目>/<sessionId>`、`tasks/<sessionId>`、`file-history/<sessionId>`、`session-env/<sessionId>` 和索引条目视为一个聚合。删除前逐项计算指纹并复制到工具专属备份目录，验证副本后才删除；恢复只写回缺失或完全一致的目标，拒绝覆盖不同内容。
 
+Codex 桌面版还会在 `.codex-global-state.json` 及其 `.bak` 中保存线程描述、项目归属、客户端绑定和标签页路由。完整会话删除会按目标会话 ID 定点清理这些非权威桌面引用，并把原文件放入同一次删除备份；不清理会导致 rollout 与 SQLite 已删除、但桌面侧栏仍显示标题且点击后无法加载。桌面版持有这些状态的内存副本，因此存在待清理引用时必须先退出桌面版；进程检测会区分桌面 `app-server` 与普通 CLI，只阻止前者。
+
+较新的桌面版另有 `.codex/sqlite/codex-dev.db` 本地线程目录。`local_thread_catalog` 可以在权威 rollout 与 `state_N.sqlite` 记录消失后继续提供侧栏标题，所以它与已知的扫描、时间线关联表也必须按线程 ID 同步清理。工具使用 SQLite 在线备份、内容快照校验和定点行恢复，不以旧数据库整文件覆盖删除后产生的其他目录变化。
+
 ### 只读操作
 
 浏览器请求 → `src/server.mjs` → registry/core/context/health → 读取本地文件或 SQLite → JSON 返回。只读接口不会创建操作历史。

@@ -16,10 +16,18 @@ import {
   previewSessionDeletion,
   readSessionDeletionBackupContent,
 } from '../src/session-delete.mjs';
+import {
+  applyCodexDesktopCatalogCleanup,
+  rollbackCodexDesktopCatalog,
+} from '../src/codex-desktop-catalog.mjs';
 
 const SESSION_ID = '019faa00-aaaa-7222-8333-444455556666';
 const CHILD_ID = '019faa00-bbbb-7222-8333-444455556666';
 const NO_CODEX_PROCESSES = { available: true, processes: [] };
+const RUNNING_CODEX_DESKTOP = {
+  available: true,
+  processes: [{ pid: 4242, name: 'codex.exe', desktopAppServer: true }],
+};
 
 function rollout() {
   return `${JSON.stringify({
@@ -49,6 +57,41 @@ async function fixture({ withRollout = true } = {}) {
     JSON.stringify({ id: SESSION_ID, thread_name: 'Delete me' }),
     JSON.stringify({ id: CHILD_ID, thread_name: 'Keep me' }),
   ].join('\n') + '\n', 'utf8');
+  const desktopState = JSON.stringify({
+    'projectless-thread-ids': [SESSION_ID, CHILD_ID],
+    'thread-project-assignments': {
+      [SESSION_ID]: { projectKind: 'local', projectId: 'project-1' },
+      [CHILD_ID]: { projectKind: 'local', projectId: 'project-1' },
+    },
+    'electron-persisted-atom-state': {
+      'thread-descriptions-v1': { [SESSION_ID]: 'Delete me', [CHILD_ID]: 'Keep child' },
+      'client-thread-bindings-v1': { 'client-target': SESSION_ID, 'client-child': CHILD_ID },
+      [`thread-reference-capability:${SESSION_ID}`]: true,
+      [`thread-reference-capability:${CHILD_ID}`]: true,
+    },
+  });
+  await writeFile(path.join(codexHome, '.codex-global-state.json'), desktopState, 'utf8');
+  await writeFile(path.join(codexHome, '.codex-global-state.json.bak'), desktopState, 'utf8');
+  const desktopCatalogDir = path.join(codexHome, 'sqlite');
+  const desktopCatalogPath = path.join(desktopCatalogDir, 'codex-dev.db');
+  await mkdir(desktopCatalogDir, { recursive: true });
+  const desktopCatalog = new DatabaseSync(desktopCatalogPath);
+  desktopCatalog.exec(`
+    CREATE TABLE local_thread_catalog (
+      thread_id TEXT PRIMARY KEY,
+      title TEXT,
+      cwd TEXT
+    );
+    CREATE TABLE local_thread_catalog_scan_entries (
+      thread_id TEXT PRIMARY KEY,
+      observed INTEGER NOT NULL
+    );
+  `);
+  desktopCatalog.prepare('INSERT INTO local_thread_catalog VALUES (?, ?, ?)').run(SESSION_ID, 'Delete me', 'D:\\project');
+  desktopCatalog.prepare('INSERT INTO local_thread_catalog VALUES (?, ?, ?)').run(CHILD_ID, 'Keep child', 'D:\\project');
+  desktopCatalog.prepare('INSERT INTO local_thread_catalog_scan_entries VALUES (?, 1)').run(SESSION_ID);
+  desktopCatalog.prepare('INSERT INTO local_thread_catalog_scan_entries VALUES (?, 1)').run(CHILD_ID);
+  desktopCatalog.close();
   if (withRollout) await writeFile(rolloutPath, rollout(), 'utf8');
 
   const dbPath = path.join(codexHome, 'state_5.sqlite');
@@ -100,6 +143,7 @@ async function fixture({ withRollout = true } = {}) {
     rolloutPath,
     dbPath,
     historyDbPath,
+    desktopCatalogPath,
     env: { ...process.env, USERPROFILE: root, HOME: root },
   };
 }
@@ -131,6 +175,8 @@ test('whole-session deletion backs up and removes rollout, SQLite row, and legac
     indexRows: 1,
     childThreadsKept: 1,
     historicalBackupFiles: 0,
+    desktopStateReferences: 10,
+    desktopCatalogRows: 2,
   });
   assert.equal(preview.canApply, true);
 
@@ -146,6 +192,20 @@ test('whole-session deletion backs up and removes rollout, SQLite row, and legac
   const index = await readFile(path.join(data.codexHome, 'session_index.jsonl'), 'utf8');
   assert.equal(index.includes(SESSION_ID), false);
   assert.equal(index.includes(CHILD_ID), true);
+  for (const name of ['.codex-global-state.json', '.codex-global-state.json.bak']) {
+    const desktop = JSON.parse(await readFile(path.join(data.codexHome, name), 'utf8'));
+    assert.equal(JSON.stringify(desktop).includes(SESSION_ID), false);
+    assert.equal(JSON.stringify(desktop).includes(CHILD_ID), true);
+  }
+  assert.equal(result.deleted.desktopStateReferences, 10);
+  assert.equal(result.deleted.desktopCatalogRows, 2);
+  assert.equal(result.backup.desktopStateBackups.length, 2);
+  assert.equal(await missing(result.backup.desktopCatalogBackup.backupPath), false);
+  const desktopCatalogAfter = new DatabaseSync(data.desktopCatalogPath, { readOnly: true });
+  assert.equal(desktopCatalogAfter.prepare('SELECT COUNT(*) AS count FROM local_thread_catalog WHERE thread_id = ?').get(SESSION_ID).count, 0);
+  assert.equal(desktopCatalogAfter.prepare('SELECT COUNT(*) AS count FROM local_thread_catalog WHERE thread_id = ?').get(CHILD_ID).count, 1);
+  assert.equal(desktopCatalogAfter.prepare('SELECT COUNT(*) AS count FROM local_thread_catalog_scan_entries WHERE thread_id = ?').get(SESSION_ID).count, 0);
+  desktopCatalogAfter.close();
 
   const db = new DatabaseSync(data.dbPath, { readOnly: true });
   assert.equal(db.prepare('SELECT count(*) AS count FROM threads WHERE id = ?').get(SESSION_ID).count, 0);
@@ -175,6 +235,72 @@ test('whole-session deletion can remove SQLite-only residue without fabricating 
   });
   assert.equal(result.backup.rolloutBackup, null);
   assert.equal(await missing(result.backup.stateDbBackup), false);
+});
+
+test('whole-session deletion refuses a changed Codex desktop state before touching session data', async () => {
+  const data = await fixture({ withRollout: true });
+  const options = {
+    backupRoot: data.backupRoot,
+    env: data.env,
+    sessionId: SESSION_ID,
+    now: new Date('2026-07-30T12:15:00Z'),
+    codexProcessCheck: NO_CODEX_PROCESSES,
+  };
+  const preview = await previewSessionDeletion(data.codexHome, options);
+  const desktopPath = path.join(data.codexHome, '.codex-global-state.json');
+  const desktop = JSON.parse(await readFile(desktopPath, 'utf8'));
+  desktop.unrelatedSetting = true;
+  await writeFile(desktopPath, JSON.stringify(desktop), 'utf8');
+
+  await assert.rejects(
+    applySessionDeletion(data.codexHome, { ...options, planToken: preview.planToken }),
+    (error) => error?.code === 'STALE_SESSION_DELETE_PLAN',
+  );
+  assert.equal(await missing(data.rolloutPath), false);
+  const db = new DatabaseSync(data.dbPath, { readOnly: true });
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM threads WHERE id = ?').get(SESSION_ID).count, 1);
+  db.close();
+});
+
+test('whole-session deletion waits for Codex desktop to exit before changing sidebar state', async () => {
+  const data = await fixture({ withRollout: true });
+  const options = {
+    backupRoot: data.backupRoot,
+    env: data.env,
+    sessionId: SESSION_ID,
+    codexProcessCheck: RUNNING_CODEX_DESKTOP,
+  };
+  const preview = await previewSessionDeletion(data.codexHome, options);
+  assert.equal(preview.blockedByRunningDesktop, true);
+  assert.equal(preview.canApply, false);
+  assert.deepEqual(preview.desktopProcesses.map((item) => item.pid), [4242]);
+
+  await assert.rejects(
+    applySessionDeletion(data.codexHome, { ...options, planToken: preview.planToken }),
+    (error) => error?.code === 'CODEX_DESKTOP_STILL_RUNNING',
+  );
+  assert.equal(await missing(data.rolloutPath), false);
+  const desktop = await readFile(path.join(data.codexHome, '.codex-global-state.json'), 'utf8');
+  assert.equal(desktop.includes(SESSION_ID), true);
+});
+
+test('Codex desktop catalog cleanup removes and merge-restores only selected thread rows', async () => {
+  const data = await fixture({ withRollout: true });
+  const preview = await previewSessionDeletion(data.codexHome, {
+    backupRoot: data.backupRoot,
+    env: data.env,
+    sessionId: SESSION_ID,
+    codexProcessCheck: NO_CODEX_PROCESSES,
+  });
+  const cleaned = await applyCodexDesktopCatalogCleanup(preview.desktopCatalog, [SESSION_ID]);
+  assert.equal(cleaned.rows, 2);
+  const rollbackErrors = await rollbackCodexDesktopCatalog(preview.desktopCatalog);
+  assert.deepEqual(rollbackErrors, []);
+  const db = new DatabaseSync(data.desktopCatalogPath, { readOnly: true });
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM local_thread_catalog WHERE thread_id = ?').get(SESSION_ID).count, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM local_thread_catalog WHERE thread_id = ?').get(CHILD_ID).count, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM local_thread_catalog_scan_entries WHERE thread_id = ?').get(SESSION_ID).count, 1);
+  db.close();
 });
 
 test('whole-session deletion accepts Windows extended-length rollout paths', async () => {
@@ -284,6 +410,8 @@ test('batch deletion uses one backup and removes all selected rows in one operat
     childThreadsKept: 0,
     historicalBackupFiles: 0,
     backupOnlySessions: 0,
+    desktopStateReferences: 20,
+    desktopCatalogRows: 4,
   });
   const result = await applySessionDeletionBatch(data.codexHome, {
     ...options,

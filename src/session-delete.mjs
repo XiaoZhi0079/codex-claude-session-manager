@@ -30,6 +30,18 @@ import {
   prepareThreadHistoryMutation,
   withTargetSessionLocks,
 } from './codex-thread-history.mjs';
+import {
+  applyCodexDesktopStateCleanup,
+  backupCodexDesktopState,
+  inspectCodexDesktopState,
+  rollbackCodexDesktopState,
+} from './codex-desktop-state.mjs';
+import {
+  applyCodexDesktopCatalogCleanup,
+  backupCodexDesktopCatalog,
+  inspectCodexDesktopCatalog,
+  rollbackCodexDesktopCatalog,
+} from './codex-desktop-catalog.mjs';
 
 function normalizePathKey(value) {
   let comparable = String(value);
@@ -183,6 +195,10 @@ async function resolveProcessCheck(options) {
   return detectRunningCodexProcesses(options.platform);
 }
 
+function runningCodexDesktopProcesses(processCheck) {
+  return (processCheck?.processes || []).filter((item) => item?.desktopAppServer === true);
+}
+
 function planTokenFor(plan) {
   return createHash('sha256').update(JSON.stringify({
     sessionId: plan.session.id,
@@ -193,6 +209,8 @@ function planTokenFor(plan) {
     indexSourceHash: plan.indexSourceHash,
     indexRows: plan.indexRows,
     historicalBackupFiles: plan.historicalBackupFiles,
+    desktopStateFiles: plan.desktopState.files,
+    desktopCatalog: plan.desktopCatalog,
   })).digest('hex');
 }
 
@@ -201,10 +219,12 @@ export async function previewSessionDeletion(codexHome, options = {}) {
   if (!sessionId) {
     throw new CleanerError('MISSING_SESSION', 'Select a session before deleting it.', 400);
   }
-  const [registry, codexProcessCheck, indexState] = await Promise.all([
+  const [registry, codexProcessCheck, indexState, desktopState, desktopCatalog] = await Promise.all([
     buildSessionRegistry(codexHome, options),
     resolveProcessCheck(options),
     readIndexState(codexHome, sessionId),
+    inspectCodexDesktopState(codexHome, [sessionId]),
+    inspectCodexDesktopCatalog(codexHome, [sessionId]),
   ]);
   const session = registry.sessions.find((item) => item.id === sessionId);
   if (!session) {
@@ -232,14 +252,26 @@ export async function previewSessionDeletion(codexHome, options = {}) {
     }
   }
 
-  const actionCount = Number(Boolean(rolloutPath))
+  const liveActionCount = Number(Boolean(rolloutPath))
     + Number(Boolean(threadState.row))
     + indexState.matchingRows;
   const historicalBackupFiles = await managedHistoricalBackupFiles(session, registry.backupRoot);
+  const permanentBackupDeletion = historicalBackupFiles.length > 0 && liveActionCount === 0;
+  const effectiveDesktopState = permanentBackupDeletion
+    ? { files: [], references: 0 }
+    : desktopState;
+  const effectiveDesktopCatalog = permanentBackupDeletion
+    ? { path: null, tables: [], rows: 0 }
+    : desktopCatalog;
+  const actionCount = liveActionCount + effectiveDesktopState.references + effectiveDesktopCatalog.rows;
   const targetSessionLock = options.sessionLocksHeld
     ? { available: true, sessions: [], activeSessionIds: [], heldByCleaner: true }
     : await inspectTargetSessionLocks(codexHome, [sessionId], options);
   const blockedByActiveTarget = targetSessionLock.activeSessionIds.length > 0;
+  const desktopProcesses = runningCodexDesktopProcesses(codexProcessCheck);
+  const blockedByRunningDesktop = (
+    effectiveDesktopState.references > 0 || effectiveDesktopCatalog.rows > 0
+  ) && desktopProcesses.length > 0;
   const plan = {
     session: {
       id: session.id,
@@ -256,12 +288,16 @@ export async function previewSessionDeletion(codexHome, options = {}) {
     indexPath: indexState.indexPath,
     indexSourceHash: indexState.sourceHash,
     indexRows: indexState.matchingRows,
+    desktopState: effectiveDesktopState,
+    desktopCatalog: effectiveDesktopCatalog,
     historicalBackupFiles,
-    permanentBackupDeletion: historicalBackupFiles.length > 0,
+    permanentBackupDeletion,
     childThreadCount: threadState.childThreadCount,
     codexProcessCheck,
     codexRunning: codexProcessCheck.processes.length > 0,
     blockedByRunningCodex: false,
+    desktopProcesses,
+    blockedByRunningDesktop,
     targetSessionLock,
     blockedByActiveTarget,
     refreshCodexAfterApply: codexProcessCheck.processes.length > 0,
@@ -272,8 +308,12 @@ export async function previewSessionDeletion(codexHome, options = {}) {
       indexRows: indexState.matchingRows,
       childThreadsKept: threadState.childThreadCount,
       historicalBackupFiles: historicalBackupFiles.length,
+      desktopStateReferences: effectiveDesktopState.references,
+      desktopCatalogRows: effectiveDesktopCatalog.rows,
     },
-    canApply: (actionCount > 0 || historicalBackupFiles.length > 0) && !blockedByActiveTarget,
+    canApply: (actionCount > 0 || historicalBackupFiles.length > 0)
+      && !blockedByActiveTarget
+      && !blockedByRunningDesktop,
   };
   return { ...plan, planToken: planTokenFor(plan) };
 }
@@ -325,6 +365,8 @@ async function createDeletionBackup(codexHome, preview, now, options) {
     backupDir,
     options,
   );
+  const desktopStateBackups = await backupCodexDesktopState(preview.desktopState, backupDir);
+  const desktopCatalogBackup = await backupCodexDesktopCatalog(preview.desktopCatalog, backupDir);
 
   const manifestPath = path.join(backupDir, 'manifest.json');
   await writeFile(manifestPath, JSON.stringify({
@@ -338,10 +380,21 @@ async function createDeletionBackup(codexHome, preview, now, options) {
     indexPath: preview.indexPath,
     indexBackup,
     threadHistoryBackup: threadHistory.backup,
+    desktopStateBackups,
+    desktopCatalogBackup,
     childThreadsKept: preview.childThreadCount,
     planToken: preview.planToken,
   }, null, 2), 'utf8');
-  return { backupDir, manifestPath, rolloutBackup, stateDbBackup, indexBackup, threadHistory };
+  return {
+    backupDir,
+    manifestPath,
+    rolloutBackup,
+    stateDbBackup,
+    indexBackup,
+    threadHistory,
+    desktopStateBackups,
+    desktopCatalogBackup,
+  };
 }
 
 export async function applySessionDeletion(codexHome, options = {}) {
@@ -359,17 +412,31 @@ export async function applySessionDeletion(codexHome, options = {}) {
       409,
     );
   }
+  if (preview.blockedByRunningDesktop) {
+    throw new CleanerError(
+      'CODEX_DESKTOP_STILL_RUNNING',
+      'Close Codex desktop before deleting sessions that have desktop sidebar references.',
+      409,
+      { processIds: preview.desktopProcesses.map((item) => item.pid) },
+    );
+  }
   if (!preview.canApply) {
     throw new CleanerError('SESSION_NOT_DELETABLE', 'No live Codex session data was found to delete.', 422);
   }
 
   const now = options.now instanceof Date ? options.now : new Date();
-  const backup = preview.permanentBackupDeletion ? null : await createDeletionBackup(codexHome, preview, now, options);
+  const backup = preview.permanentBackupDeletion && !preview.desktopState.references
+    ? null
+    : await createDeletionBackup(codexHome, preview, now, options);
   let rolloutRemoved = false;
   let indexChanged = false;
   let db;
   let transactionStarted = false;
   const removedHistoricalBackups = [];
+  let desktopStateChanged = false;
+  let desktopStateCleanup = { files: [], references: 0 };
+  let desktopCatalogChanged = false;
+  let desktopCatalogCleanup = { tables: [], rows: 0 };
   try {
     if (preview.rolloutPath) {
       await unlink(preview.rolloutPath);
@@ -392,6 +459,17 @@ export async function applySessionDeletion(codexHome, options = {}) {
       await unlink(historical.path);
       removedHistoricalBackups.push(historical.path);
     }
+    desktopStateCleanup = await applyCodexDesktopStateCleanup(
+      preview.desktopState,
+      [preview.session.id],
+      backup?.desktopStateBackups,
+    );
+    desktopStateChanged = desktopStateCleanup.files.length > 0;
+    desktopCatalogCleanup = await applyCodexDesktopCatalogCleanup(
+      preview.desktopCatalog,
+      [preview.session.id],
+    );
+    desktopCatalogChanged = desktopCatalogCleanup.rows > 0;
     if (preview.sqliteRow) {
       const sqlite = await loadSqlite();
       db = new sqlite.DatabaseSync(preview.stateDbPath);
@@ -420,6 +498,8 @@ export async function applySessionDeletion(codexHome, options = {}) {
         sqliteRows: Number(Boolean(preview.sqliteRow)),
         indexRows: preview.indexRows,
         historicalBackupFiles: removedHistoricalBackups.length,
+        desktopStateReferences: desktopStateCleanup.references,
+        desktopCatalogRows: desktopCatalogCleanup.rows,
       },
       childThreadsKept: preview.childThreadCount,
       codexRefreshRecommended: preview.codexRunning,
@@ -439,6 +519,12 @@ export async function applySessionDeletion(codexHome, options = {}) {
       try { await copyFile(backup.indexBackup, preview.indexPath); } catch (rollbackError) {
         rollbackErrors.push({ target: preview.indexPath, message: rollbackError.message });
       }
+    }
+    if (desktopStateChanged) {
+      rollbackErrors.push(...await rollbackCodexDesktopState(backup?.desktopStateBackups));
+    }
+    if (desktopCatalogChanged) {
+      rollbackErrors.push(...await rollbackCodexDesktopCatalog(preview.desktopCatalog));
     }
     if (error instanceof CleanerError) {
       error.details = {
@@ -551,6 +637,8 @@ function batchPlanTokenFor(plan) {
     })),
     stateDbPath: plan.stateDbPath,
     indexSourceHash: plan.indexSourceHash,
+    desktopStateFiles: plan.desktopState.files,
+    desktopCatalog: plan.desktopCatalog,
   })).digest('hex');
 }
 
@@ -624,6 +712,13 @@ export async function previewSessionDeletionBatch(codexHome, options = {}) {
       { sessionIds: undeletable.map((session) => session.id) },
     );
   }
+  const liveSessionIds = sessions
+    .filter((session) => session.rolloutPath || session.sqliteRow || session.indexRows)
+    .map((session) => session.id);
+  const [desktopState, desktopCatalog] = await Promise.all([
+    inspectCodexDesktopState(codexHome, liveSessionIds),
+    inspectCodexDesktopCatalog(codexHome, liveSessionIds),
+  ]);
   const summary = {
     sessions: sessions.length,
     rolloutFiles: sessions.filter((session) => session.rolloutPath).length,
@@ -633,25 +728,35 @@ export async function previewSessionDeletionBatch(codexHome, options = {}) {
     childThreadsKept: sessions.reduce((total, session) => total + session.childThreadsKept, 0),
     historicalBackupFiles: sessions.reduce((total, session) => total + session.historicalBackupFiles.length, 0),
     backupOnlySessions: sessions.filter((session) => session.historicalBackupFiles.length > 0).length,
+    desktopStateReferences: desktopState.references,
+    desktopCatalogRows: desktopCatalog.rows,
   };
   const targetSessionLock = options.sessionLocksHeld
     ? { available: true, sessions: [], activeSessionIds: [], heldByCleaner: true }
     : await inspectTargetSessionLocks(codexHome, sessionIds, options);
   const blockedByActiveTarget = targetSessionLock.activeSessionIds.length > 0;
+  const desktopProcesses = runningCodexDesktopProcesses(codexProcessCheck);
+  const blockedByRunningDesktop = (
+    desktopState.references > 0 || desktopCatalog.rows > 0
+  ) && desktopProcesses.length > 0;
   const plan = {
     sessions,
     summary,
     stateDbPath: registry.stateDbPath,
     indexPath: indexState.indexPath,
     indexSourceHash: indexState.sourceHash,
+    desktopState,
+    desktopCatalog,
     codexProcessCheck,
     codexRunning: codexProcessCheck.processes.length > 0,
     blockedByRunningCodex: false,
+    desktopProcesses,
+    blockedByRunningDesktop,
     targetSessionLock,
     blockedByActiveTarget,
     refreshCodexAfterApply: codexProcessCheck.processes.length > 0,
     deletionBackupRoot: deletionBackupRoot(codexHome, options),
-    canApply: sessions.length > 0 && !blockedByActiveTarget,
+    canApply: sessions.length > 0 && !blockedByActiveTarget && !blockedByRunningDesktop,
   };
   return { ...plan, planToken: batchPlanTokenFor(plan) };
 }
@@ -709,6 +814,8 @@ async function createBatchDeletionBackup(codexHome, preview, now, options) {
     backupDir,
     options,
   );
+  const desktopStateBackups = await backupCodexDesktopState(preview.desktopState, backupDir);
+  const desktopCatalogBackup = await backupCodexDesktopCatalog(preview.desktopCatalog, backupDir);
   const manifestPath = path.join(backupDir, 'manifest.json');
   await writeFile(manifestPath, JSON.stringify({
     createdAt: now.toISOString(),
@@ -730,9 +837,20 @@ async function createBatchDeletionBackup(codexHome, preview, now, options) {
     indexPath: preview.indexPath,
     indexBackup,
     threadHistoryBackup: threadHistory.backup,
+    desktopStateBackups,
+    desktopCatalogBackup,
     planToken: preview.planToken,
   }, null, 2), 'utf8');
-  return { backupDir, manifestPath, rolloutBackups, stateDbBackup, indexBackup, threadHistory };
+  return {
+    backupDir,
+    manifestPath,
+    rolloutBackups,
+    stateDbBackup,
+    indexBackup,
+    threadHistory,
+    desktopStateBackups,
+    desktopCatalogBackup,
+  };
 }
 
 export async function applySessionDeletionBatch(codexHome, options = {}) {
@@ -750,10 +868,20 @@ export async function applySessionDeletionBatch(codexHome, options = {}) {
       409,
     );
   }
+  if (preview.blockedByRunningDesktop) {
+    throw new CleanerError(
+      'CODEX_DESKTOP_STILL_RUNNING',
+      'Close Codex desktop before deleting sessions that have desktop sidebar references.',
+      409,
+      { processIds: preview.desktopProcesses.map((item) => item.pid) },
+    );
+  }
   const now = options.now instanceof Date ? options.now : new Date();
   const hasRecoverableDeletion = preview.summary.rolloutFiles > 0
     || preview.summary.sqliteRows > 0
-    || preview.summary.indexRows > 0;
+    || preview.summary.indexRows > 0
+    || preview.summary.desktopStateReferences > 0
+    || preview.summary.desktopCatalogRows > 0;
   const backup = hasRecoverableDeletion
     ? await createBatchDeletionBackup(codexHome, preview, now, options)
     : null;
@@ -763,6 +891,10 @@ export async function applySessionDeletionBatch(codexHome, options = {}) {
   let db;
   let transactionStarted = false;
   const removedHistoricalBackups = [];
+  let desktopStateChanged = false;
+  let desktopStateCleanup = { files: [], references: 0 };
+  let desktopCatalogChanged = false;
+  let desktopCatalogCleanup = { tables: [], rows: 0 };
   try {
     for (const session of preview.sessions) {
       if (!session.rolloutPath) continue;
@@ -787,6 +919,17 @@ export async function applySessionDeletionBatch(codexHome, options = {}) {
         removedHistoricalBackups.push(historical.path);
       }
     }
+    desktopStateCleanup = await applyCodexDesktopStateCleanup(
+      preview.desktopState,
+      preview.sessions.map((session) => session.id),
+      backup?.desktopStateBackups,
+    );
+    desktopStateChanged = desktopStateCleanup.files.length > 0;
+    desktopCatalogCleanup = await applyCodexDesktopCatalogCleanup(
+      preview.desktopCatalog,
+      preview.sessions.map((session) => session.id),
+    );
+    desktopCatalogChanged = desktopCatalogCleanup.rows > 0;
     const sqliteSessions = preview.sessions.filter((session) => session.sqliteRow);
     if (sqliteSessions.length) {
       const sqlite = await loadSqlite();
@@ -822,6 +965,8 @@ export async function applySessionDeletionBatch(codexHome, options = {}) {
       deleted: {
         ...preview.summary,
         historicalBackupFiles: removedHistoricalBackups.length,
+        desktopStateReferences: desktopStateCleanup.references,
+        desktopCatalogRows: desktopCatalogCleanup.rows,
       },
       codexRefreshRecommended: preview.codexRunning,
       threadHistory: { ...backup?.threadHistory, invalidation: historyInvalidation },
@@ -842,6 +987,12 @@ export async function applySessionDeletionBatch(codexHome, options = {}) {
       try { await copyFile(backup.indexBackup, preview.indexPath); } catch (rollbackError) {
         rollbackErrors.push({ target: preview.indexPath, message: rollbackError.message });
       }
+    }
+    if (desktopStateChanged) {
+      rollbackErrors.push(...await rollbackCodexDesktopState(backup?.desktopStateBackups));
+    }
+    if (desktopCatalogChanged) {
+      rollbackErrors.push(...await rollbackCodexDesktopCatalog(preview.desktopCatalog));
     }
     if (error instanceof CleanerError) {
       error.details = {

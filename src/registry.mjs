@@ -31,10 +31,17 @@ const execFileAsync = promisify(execFile);
 function normalizeDetectedProcess(item) {
   const pid = Number(item?.pid ?? item?.ProcessId);
   if (!Number.isInteger(pid) || pid <= 0) return null;
+  const commandLine = String(item?.commandLine ?? item?.CommandLine ?? '').trim();
+  const executablePath = String(item?.executablePath ?? item?.ExecutablePath ?? '').trim();
+  const parentName = String(item?.parentName ?? item?.ParentName ?? '').trim();
   return {
     pid,
     parentPid: Number(item?.parentPid ?? item?.ParentProcessId) || null,
     name: String(item?.name ?? item?.Name ?? 'codex').trim() || 'codex',
+    parentName: parentName || null,
+    desktopAppServer: /(?:^|\s)app-server(?:\s|$)/i.test(commandLine)
+      && /[\\/]OpenAI[\\/]Codex[\\/]bin[\\/]/i.test(executablePath)
+      && /^ChatGPT\.exe$/i.test(parentName),
   };
 }
 
@@ -42,8 +49,10 @@ export async function detectRunningCodexProcesses(platform = process.platform) {
   try {
     if (platform === 'win32') {
       const command = [
-        "$items = Get-CimInstance Win32_Process | Where-Object { $_.Name -ieq 'codex.exe' }",
-        "$result = @($items | Select-Object @{Name='pid';Expression={$_.ProcessId}}, @{Name='parentPid';Expression={$_.ParentProcessId}}, @{Name='name';Expression={$_.Name}})",
+        '$all = @(Get-CimInstance Win32_Process)',
+        "$items = @($all | Where-Object { $_.Name -ieq 'codex.exe' })",
+        '$parents = @{}; foreach ($process in $all) { $parents[[int]$process.ProcessId] = $process.Name }',
+        "$result = @($items | Select-Object @{Name='pid';Expression={$_.ProcessId}}, @{Name='parentPid';Expression={$_.ParentProcessId}}, @{Name='parentName';Expression={$parents[[int]$_.ParentProcessId]}}, @{Name='name';Expression={$_.Name}}, @{Name='commandLine';Expression={$_.CommandLine}}, @{Name='executablePath';Expression={$_.ExecutablePath}})",
         'ConvertTo-Json -InputObject $result -Compress',
       ].join('; ');
       const { stdout } = await execFileAsync(

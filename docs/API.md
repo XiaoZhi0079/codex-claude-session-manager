@@ -22,6 +22,10 @@ Codex 轮次的 `status` 可为 `completed`、`failed` 或 `aborted`。`failed` 
 
 Codex 子代理的轮次响应会把与父会话共享的连续 `turn_id` 从 `turns` 移入 `inheritedTurns`，并通过 `subagentContext` 返回父会话、启动子代理的父轮次问题及继承范围。`agent_message` 任务记录会在精简模式中只读展示；若任务正文由 Codex 保存为 `encrypted_content`，接口会明确标记而不会伪造明文。完整上下文中的继承记录带有 `inherited: true`，不返回编辑目标；编辑、工具删除和轮次清理接口会拒绝修改继承轮次。
 
+Codex 完整会话删除的预览和结果通过 `summary.desktopStateReferences` / `deleted.desktopStateReferences` 报告同步清理的桌面端引用数量。目标包括 `.codex-global-state.json` 及其 `.bak` 中与所选会话 ID 精确关联的线程描述、项目归属、客户端绑定和路由字段；文件会纳入同一次删除备份，哈希变化会使应用请求以 409 拒绝执行。若检测到 Codex 桌面版的 `app-server` 仍在运行且存在待清理引用，预览会返回 `blockedByRunningDesktop: true` 并禁止应用，避免桌面进程把内存中的幽灵标题重新写回；普通 Codex CLI 进程不会因此被阻止。
+
+新版 Codex 桌面版还使用 `.codex/sqlite/codex-dev.db` 的 `local_thread_catalog` 等线程目录表。删除预览和结果通过 `summary.desktopCatalogRows` / `deleted.desktopCatalogRows` 报告命中数量；数据库会通过 SQLite 在线备份纳入同一删除备份，应用时逐行校验预览内容并在事务中删除目标 ID。目录发生变化时以 409 拒绝，后续步骤失败时只合并恢复本次删除的目录行。
+
 ## Claude Code 资源
 
 | 方法 | 路径 | 用途 |

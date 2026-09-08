@@ -2639,7 +2639,7 @@ function renderSessionDeletePlan(plan) {
     $('sessionDeleteWarning').classList.remove('hidden');
     return;
   }
-  $('sessionDeleteIntro').textContent = '从 Codex 中移除正文、索引和分页历史；只需关闭目标会话，其他 Codex 窗口可以继续使用。';
+  $('sessionDeleteIntro').textContent = '从 Codex 中移除正文、索引、分页历史和桌面端会话引用；操作前会创建可恢复备份。';
   $('sessionDeletePrimaryLabel').textContent = 'rollout 文件';
   $('sessionDeleteSecondaryLabel').textContent = 'SQLite 记录';
   $('sessionDeleteIndexLabel').textContent = '旧索引记录';
@@ -2666,7 +2666,9 @@ function renderSessionDeletePlan(plan) {
     : '备份并删除整个会话';
   const warning = $('sessionDeleteWarning');
   const messages = [];
-  if (plan.blockedByActiveTarget) {
+  if (plan.blockedByRunningDesktop) {
+    messages.push('Codex 桌面版仍在运行，可能把内存中的旧侧栏状态重新写回。请完全退出桌面版后重新预览；Codex CLI 可以继续运行。');
+  } else if (plan.blockedByActiveTarget) {
     const count = plan.targetSessionLock?.activeSessionIds?.length || 1;
     messages.push(`${count} 个目标会话仍在 Codex 中打开。请只关闭这些目标会话后重新预览；其他 Codex 窗口可以保持打开。`);
   } else if (plan.codexRunning) {
@@ -2681,6 +2683,9 @@ function renderSessionDeletePlan(plan) {
   }
   if (plan.summary.childThreadsKept) {
     messages.push(`检测到 ${plan.summary.childThreadsKept} 个直接子代理线程；本次不会连带删除它们。`);
+  }
+  if (plan.summary.desktopStateReferences || plan.summary.desktopCatalogRows) {
+    messages.push(`将同时清理 ${plan.summary.desktopStateReferences || 0} 条桌面状态引用和 ${plan.summary.desktopCatalogRows || 0} 条桌面线程目录记录，并纳入删除备份。`);
   }
   warning.textContent = messages.join(' ');
   warning.classList.toggle('hidden', messages.length === 0);
@@ -2751,10 +2756,12 @@ async function applySessionDelete() {
     return;
   }
   const deletedHistorical = body.deleted?.historicalBackupFiles || 0;
+  const deletedDesktopReferences = body.deleted?.desktopStateReferences || 0;
+  const deletedDesktopCatalogRows = body.deleted?.desktopCatalogRows || 0;
   setAlert(
     deletedHistorical
       ? `已永久删除 ${deletedHistorical} 份历史备份，会话已从本工具列表移除。`
-      : `${deletedIds.length} 个会话已从 Codex 中删除；可恢复备份位于 ${backupDir}。其他 Codex 窗口无需退出。`,
+      : `${deletedIds.length} 个会话已从 Codex 中删除；可恢复备份位于 ${backupDir}。${deletedDesktopReferences || deletedDesktopCatalogRows ? `已清理 ${deletedDesktopReferences} 条桌面状态引用和 ${deletedDesktopCatalogRows} 条桌面线程目录记录，现在可以重新打开 Codex 桌面版。` : '其他 Codex 窗口无需退出。'}`,
     'success',
   );
 }
